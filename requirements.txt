@@ -5,8 +5,11 @@ python-multipart
 PyPDF2
 Pillow
 pydantic
+<<<<<<< HEAD
 langchain
 langchain-chroma
 chromadb
 sentence-transformers
 langchain-google-genai
+=======
+>>>>>>> dcf868964bd0c80e4224627d3e0b8823827d998c
