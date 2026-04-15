@@ -23,6 +23,7 @@ from google.api_core.exceptions import ResourceExhausted
 from rag import search_docs 
 from routers.onboarding import router as onboarding_router
 import logging 
+from dotenv import load_dotenv
 
 import PyPDF2
 import io
@@ -50,13 +51,18 @@ app.mount("/avatars", StaticFiles(directory=AVATARS_DIR), name="avatars")
 # MỞ CỔNG CHO PHÉP XEM/TẢI TÀI LIỆU PDF/TXT
 app.mount("/files", StaticFiles(directory=DOCS_DIR), name="files")
 
-API_KEYS = [
-    "AIzaSyBn12wK720AZzr0HWJ8nMV8rJZug1jJH6M", 
-    "AIzaSyAah7pl-rrIY3vqTk7yd5QSssq0G1QNnF4", 
-    "AIzaSyBSYV3BAI1on-QpmxlA-lKl6smIHGUJCQU",
-    "AIzaSyCpcPISnqitdRHu4Jx-6aCiPtQ7QyrJeaE",
-    "AIzaSyAcTQHAZ8qG4u9G4r9QspbyYCGsfraJ9xs"
+load_dotenv()
+
+raw_keys = [
+    os.getenv("GEMINI_API_KEY"),
+    os.getenv("GEMINI_API_KEY_1"),
+    os.getenv("GEMINI_API_KEY_2"),
+    os.getenv("GEMINI_API_KEY_3"),
+    os.getenv("GEMINI_API_KEY_4"),
+    os.getenv("GEMINI_API_KEY_5")  
 ]
+
+API_KEYS = [k for k in raw_keys if k]
 
 MODELS_TO_TRY = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-pro"]
 current_key_idx = 0 
