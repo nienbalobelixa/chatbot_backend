@@ -10,4 +10,5 @@ langchain-chroma
 chromadb
 sentence-transformers
 langchain-google-genai
+langchain-huggingface
 
