@@ -18,8 +18,7 @@ langchain
 langchain-community
 langchain-chroma
 chromadb
-sentence-transformers
-langchain-huggingface
+langchain-google-genai
 
 # 5. Xử lý File (PDF, Ảnh, Text)
 PyPDF2
