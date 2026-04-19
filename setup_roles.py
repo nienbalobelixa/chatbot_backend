@@ -6,25 +6,25 @@ def setup_permissions():
     c = conn.cursor()
 
     # =======================================================
-    # 1. TẠO TÀI KHOẢN ADMIN MẶC ĐỊNH (CHỐNG MẤT QUYỀN)
+    # =======================================================
+    # 1. TẠO TÀI KHOẢN ADMIN MẶC ĐỊNH (CHUẨN BẢO MẬT SHA-256)
     # =======================================================
     print("⏳ Đang thiết lập tài khoản Admin...")
-    # Đảm bảo bảng users tồn tại
+    # Bổ sung thêm cột is_onboarded để khớp với app.py
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE,
             password TEXT,
-            role TEXT
+            role TEXT,
+            is_onboarded INTEGER DEFAULT 0
         )
     ''')
     
-    # Xóa tài khoản admin cũ (nếu có bị kẹt) để tạo mới hoàn toàn
     c.execute("DELETE FROM users WHERE username = 'admin'")
     
-    # Bơm tài khoản Giám đốc vào Database
-    # LƯU Ý: Đang để mật khẩu thuần là '123456'
-    c.execute("INSERT INTO users (username, password, role) VALUES ('admin', '123456', 'admin')")
+    # Chuỗi loằng ngoằng dưới đây chính là chữ "123456" đã được băm bằng SHA-256
+    c.execute("INSERT INTO users (username, password, role, is_onboarded) VALUES ('admin', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 'admin', 1)")
     print("✅ Đã tạo tài khoản Giám đốc: [User: admin] - [Pass: 123456]")
 
     # =======================================================
