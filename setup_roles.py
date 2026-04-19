@@ -66,3 +66,4 @@ def setup_permissions():
 
 if __name__ == "__main__":
     setup_permissions()
+    # Day la ban cap nhat tai khoan Admin
