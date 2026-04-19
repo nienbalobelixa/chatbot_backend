@@ -19,7 +19,7 @@ DB_PATH = os.path.join(BASE_DIR, "vector_db")
 # ==============================
 api_key = os.environ.get("GEMINI_API_KEY_1") or os.environ.get("GEMINI_API_KEY")
 embedding = GoogleGenerativeAIEmbeddings(
-    model="models/embedding-001", 
+    model="models/gemini-embedding-001", 
     google_api_key=api_key
 )
 
