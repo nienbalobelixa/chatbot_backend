@@ -33,6 +33,10 @@ import PIL.Image
 from fastapi import BackgroundTasks 
 app = FastAPI()
 
+os.makedirs("documents", exist_ok=True)
+os.makedirs("avatars", exist_ok=True)
+os.makedirs("vector_db", exist_ok=True)
+
 class EndpointFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
@@ -44,7 +48,10 @@ class EndpointFilter(logging.Filter):
 # Áp dụng bộ lọc cho Uvicorn
 logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], 
+                   allow_credentials=False, 
+                   allow_methods=["*"], 
+                   allow_headers=["*"])
 app.include_router(onboarding_router)
 
 DOCS_DIR = "documents"
