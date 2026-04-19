@@ -67,7 +67,7 @@ def main():
     print("🧠 Đang khởi tạo mô hình Embedding Google (Siêu nhẹ)...")
     api_key = os.environ.get("GEMINI_API_KEY_1") or os.environ.get("GEMINI_API_KEY")
     embedding = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-001", 
+        model="models/embedding-001", 
         google_api_key=api_key
     )
     

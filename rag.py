@@ -19,7 +19,7 @@ def get_vector_db():
         print("🧠 Đang kết nối mô hình Embedding siêu nhẹ của Google...")
         api_key = os.environ.get("GEMINI_API_KEY_1") or os.environ.get("GEMINI_API_KEY")
         _embedding_instance = GoogleGenerativeAIEmbeddings(
-            model="models/text-embedding-001", 
+            model="models/embedding-001", 
             google_api_key=api_key
         )
         print(" ✅  Kết nối Vector DB thành công!")
