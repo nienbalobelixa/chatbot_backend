@@ -1,0 +1,2 @@
+Câu hỏi: làm sao để xem lương 
+Câu trả lời: hiện tại xem lương chỉ có admin hoặc HR mới có thẩm quyền

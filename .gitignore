@@ -4,5 +4,4 @@
 .venv/
 vector_db/
 enterprise.db
-documents/
 avatars/
