@@ -20,7 +20,8 @@ import uvicorn
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 
-from rag import search_docs 
+
+from rag import search_docs, check_exact_faq_match
 from routers.onboarding import router as onboarding_router
 import logging 
 from dotenv import load_dotenv
@@ -34,8 +35,13 @@ app = FastAPI()
 
 class EndpointFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        return record.getMessage().find("/notifications/admin") == -1
+        msg = record.getMessage()
+        # Ẩn toàn bộ log chứa các đường dẫn gọi liên tục (polling)
+        if "/notifications/" in msg or "/admin/unanswered" in msg:
+            return False
+        return True
 
+# Áp dụng bộ lọc cho Uvicorn
 logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -53,36 +59,92 @@ app.mount("/files", StaticFiles(directory=DOCS_DIR), name="files")
 
 load_dotenv()
 
-raw_keys = [
-    os.getenv("GEMINI_API_KEY"),
-    os.getenv("GEMINI_API_KEY_1"),
-    os.getenv("GEMINI_API_KEY_2"),
-    os.getenv("GEMINI_API_KEY_3"),
-    os.getenv("GEMINI_API_KEY_4"),
-    os.getenv("GEMINI_API_KEY_5")  
-]
+# --- BẮT ĐẦU ĐOẠN CODE THAY THẾ ---
+raw_keys_dict = {
+    "Key Mặc định": os.getenv("GEMINI_API_KEY"),
+    "Key 1": os.getenv("GEMINI_API_KEY_1"),
+    "Key 2": os.getenv("GEMINI_API_KEY_2"),
+    "Key 3": os.getenv("GEMINI_API_KEY_3"),
+    "Key 4": os.getenv("GEMINI_API_KEY_4"),
+    "Key 5": os.getenv("GEMINI_API_KEY_5")
+}
 
-API_KEYS = [k for k in raw_keys if k]
+# Lọc bỏ các key rỗng, tạo danh sách các Key hợp lệ kèm Tên
+VALID_KEYS = [(name, key) for name, key in raw_keys_dict.items() if key]
+print(f"🚀 Băng đạn đã nạp: {len(VALID_KEYS)} API Keys")
 
-MODELS_TO_TRY = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-pro"]
-current_key_idx = 0 
+current_key_idx = 0
+CACHED_MODELS = [] # Bộ nhớ đệm lưu danh sách model để không phải gọi Google API liên tục
+
+def get_optimized_models():
+    """Tự động lấy danh sách model từ API và sắp xếp ưu tiên bản Flash (ít tốn token)"""
+    global CACHED_MODELS
+    if CACHED_MODELS:
+        return CACHED_MODELS
+    
+    try:
+        available_models = []
+        # Lấy danh sách toàn bộ model từ tài khoản Google
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                name = m.name.replace('models/', '')
+                available_models.append(name)
+        
+        # THUẬT TOÁN ƯU TIÊN: Lọc các model chứa chữ "flash" lên đầu
+        flash_list = [m for m in available_models if "flash" in m.lower()]
+        pro_list = [m for m in available_models if "pro" in m.lower() and "flash" not in m.lower()]
+        others = [m for m in available_models if m not in flash_list and m not in pro_list]
+        
+        # Ghép mảng: Flash bắn trước -> Pro dự phòng -> Các loại khác
+        CACHED_MODELS = flash_list + pro_list + others
+        print(f"🤖 Đã tự động cập nhật {len(CACHED_MODELS)} model. (Ưu tiên số 1: {CACHED_MODELS[0]})")
+        return CACHED_MODELS
+        
+    except Exception as e:
+        print(f"⚠️ Lỗi khi quét danh sách model: {e}. Đang dùng danh sách dự phòng cứng.")
+        return ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"]
 
 def generate_content_with_fallback(prompt) -> str:
     global current_key_idx
-    for attempt in range(len(API_KEYS)):
-        current_key = API_KEYS[current_key_idx]
+
+    if not VALID_KEYS:
+        return "Lỗi Server: Không tìm thấy API Key nào trong file .env!"
+
+    # Ghi nhớ lại vị trí bắt đầu để biết khi nào đã quét hết 1 vòng các Key
+    start_idx = current_key_idx
+
+    for attempt in range(len(VALID_KEYS)):
+        key_name, current_key = VALID_KEYS[current_key_idx]
         genai.configure(api_key=current_key)
-        for model_name in MODELS_TO_TRY:
+        
+        dynamic_models = get_optimized_models()
+
+        # [QUAN TRỌNG]: Vừa lấy Key hiện tại ra xài, lập tức chuyển kim chỉ nam sang Key tiếp theo cho lần hỏi sau
+        current_key_idx = (current_key_idx + 1) % len(VALID_KEYS)
+
+        for model_name in dynamic_models:
+            print(f" 🔄  Đang xử lý... | Dùng: [{key_name}] | Mô hình: [{model_name}]")
             try:
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(prompt)
+
+                print(f" ✅  THÀNH CÔNG   | Đã trả lời bằng [{key_name}] - [{model_name}]")
                 return response.text
+
             except ResourceExhausted:
-                continue
-            except Exception as e:
+                # Key này hết hạn mức, bẻ gãy vòng lặp model để chuyển sang vòng lặp Key tiếp theo
+                print(f" ⚠️  HẾT TOKEN    | [{key_name}] đã kiệt sức với {model_name}! Đang đổi súng...")
                 break 
-        current_key_idx = (current_key_idx + 1) % len(API_KEYS)
-    return "Hệ thống AI hiện đang quá tải do hết sạch Token dự phòng."
+
+            except Exception as e:
+                # Lỗi mạng hoặc model bảo trì, thử model tiếp theo trên CÙNG Key này
+                print(f" ❌  LỖI KHÁC     | [{key_name}] - [{model_name}] gặp sự cố: {str(e)[:50]}...")
+                continue
+
+    print(" 🚨  BÁO ĐỘNG ĐỎ  | Toàn bộ hệ thống API Key đã cạn kiệt!")
+    return "Hệ thống AI hiện đang quá tải do hết sạch Token trên tất cả các Key dự phòng. Vui lòng đợi 1 phút rồi thử lại."
+
+# --- KẾT THÚC ĐOẠN CODE THAY THẾ ---
 
 def init_db():
     conn = sqlite3.connect('enterprise.db')
@@ -159,21 +221,21 @@ def rewrite_query(original_query: str, history_text: str = "") -> str:
         return generate_content_with_fallback(prompt).strip()
     except Exception: return original_query
 
-def get_all_faqs():
-    faq_text = ""
-    try:
-        conn = sqlite3.connect('enterprise.db')
-        c = conn.cursor()
-        c.execute("SELECT file_name FROM document_permissions WHERE file_name LIKE 'FAQ_%'")
-        faqs = c.fetchall()
-        conn.close()
-        for r in faqs:
-            filepath = os.path.join(DOCS_DIR, r[0])
-            if os.path.exists(filepath):
-                with open(filepath, "r", encoding="utf-8") as f:
-                    faq_text += f.read() + "\n"
-    except: pass
-    return faq_text
+# def get_all_faqs():
+#     faq_text = ""
+#     try:
+#         conn = sqlite3.connect('enterprise.db')
+#         c = conn.cursor()
+#         c.execute("SELECT file_name FROM document_permissions WHERE file_name LIKE 'FAQ_%'")
+#         faqs = c.fetchall()
+#         conn.close()
+#         for r in faqs:
+#             filepath = os.path.join(DOCS_DIR, r[0])
+#             if os.path.exists(filepath):
+#                 with open(filepath, "r", encoding="utf-8") as f:
+#                     faq_text += f.read() + "\n"
+#     except: pass
+#     return faq_text
 
 @app.post("/ask")
 def ask_ai(data: Question, username: str = "guest"): 
@@ -199,52 +261,63 @@ def ask_ai(data: Question, username: str = "guest"):
                 prefix = "Nhân viên" if r == "user" else "AI"
                 history_text += f"{prefix}: {text_content[:500]}...\n"
 
-        optimized_query = rewrite_query(data.question, history_text)
-        rag_res = search_docs(optimized_query, user_role=user_role)
-        context = rag_res.get("answer", "")
-        sources = rag_res.get("sources", [])
-        faq_context = get_all_faqs()
+        optimized_query = data.question
 
-        current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        if user_role == 'admin':
-            prompt = f"""
-            Bạn là Trợ lý Hành chính & Nhân sự (HR Copilot) cấp cao của ABC TECH.
-            Nhiệm vụ: LÊN DÀN Ý, SOẠN THẢO VĂN BẢN, VIẾT EMAIL, THÔNG BÁO. Hành văn lịch sự, truyền cảm hứng. TUYỆT ĐỐI KHÔNG TỪ CHỐI TRẢ LỜI.
-            [TÀI LIỆU NỘI BỘ]: {context}
-            [QUY TẮC NHẮC VIỆC]:
-            Thời gian hiện tại: {current_time_str}
-            Nếu Giám đốc yêu cầu nhắc nhở: 
-            1. Trả lời xác nhận lịch sự.
-            2. Cuối câu trả lời, THÊM CHÍNH XÁC: [[REMINDER: {{"task": "nội dung ngắn gọn", "time": "YYYY-MM-DD HH:MM:SS"}}]]
-            [YÊU CẦU TỪ GIÁM ĐỐC]: {data.question}
-            """
+        # =========================================================
+        # TỐI ƯU SIÊU TỐC: KIỂM TRA BỘ NHỚ ĐỆM FAQ (SEMANTIC CACHE)
+        # =========================================================
+        direct_answer = check_exact_faq_match(optimized_query, user_role=user_role)
+        
+        if direct_answer:
+            # --- TRƯỜNG HỢP 1: ADMIN ĐÃ TỪNG TRẢ LỜI ---
+            ai_answer = direct_answer
+            # Ghi rõ nguồn là từ Admin để nhân viên yên tâm
+            sources = ["Giải đáp trực tiếp từ Admin"] 
+            follow_ups = []
+            ai_answer_raw = ai_answer 
+            
         else:
-            prompt = f"""
-            Bạn là Trợ lý AI Nội bộ và Nghiêm túc của ABC TECH. KHÔNG PHẢI chatbot tâm sự.
-            [QUY TẮC SINH TỬ]:
-            1. CHỈ ĐƯỢC PHÉP trả lời dựa trên [KHO KIẾN THỨC TỪ ADMIN] và [TÀI LIỆU NỘI BỘ]. 
-            2. KHÔNG bịa câu trả lời. KHÔNG đùa cợt.
-            3. Nếu KHÔNG CÓ THÔNG TIN, PHẢI TỪ CHỐI bằng câu: "Tôi chưa được cập nhật thông tin này."
-            [QUY TẮC NHẮC VIỆC]:
-            Thời gian hiện tại: {current_time_str}
-            Nếu nhân viên yêu cầu nhắc nhở, KHÔNG CẦN TÌM TÀI LIỆU:
-            1. Trả lời xác nhận lịch sự.
-            2. Cuối câu trả lời, THÊM CHÍNH XÁC: [[REMINDER: {{"task": "nội dung", "time": "YYYY-MM-DD HH:MM:SS"}}]]
-            [LỊCH SỬ]: {history_text}
-            [KHO KIẾN THỨC TỪ ADMIN]: {faq_context}
-            [TÀI LIỆU NỘI BỘ]: {context}
-            [CÂU HỎI MỚI]: {data.question}
-            [YÊU CẦU ĐẶC BIỆT]: Gợi ý 3 câu tiếp theo đặt dưới ký hiệu ---SUGGESTIONS---
-            """
+            # --- TRƯỜNG HỢP 2: TÌM TRONG TÀI LIỆU SÁCH VỞ ---
+            rag_res = search_docs(optimized_query, user_role=user_role)
+            context = rag_res.get("answer", "")
+            raw_sources = rag_res.get("sources", [])
+            
+            # Đánh dấu rõ các nguồn này là từ Tài Liệu (PDF, DOCX...)
+            sources = [f"Tài liệu: {s}" for s in raw_sources]
 
-        ai_answer_raw = generate_content_with_fallback(prompt)
+            current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if user_role == 'admin':
+                prompt = f"""
+                Bạn là Trợ lý Hành chính & Nhân sự (HR Copilot) cấp cao của ABC TECH.
+                Nhiệm vụ: LÊN DÀN Ý, SOẠN THẢO VĂN BẢN, VIẾT EMAIL, THÔNG BÁO. Hành văn lịch sự.
+                [TÀI LIỆU NỘI BỘ]: {context}
+                [QUY TẮC NHẮC VIỆC]:
+                Nếu Giám đốc yêu cầu nhắc nhở, thêm chính xác: [[REMINDER: {{"task": "nội dung ngắn gọn", "time": "YYYY-MM-DD HH:MM:SS"}}]]
+                [YÊU CẦU TỪ GIÁM ĐỐC]: {data.question}
+                """
+            else:
+                prompt = f"""
+                Bạn là Trợ lý AI Nội bộ của ABC TECH. KHÔNG PHẢI chatbot tâm sự.
+                [QUY TẮC SINH TỬ]:
+                1. CHỈ ĐƯỢC PHÉP trả lời dựa trên [TÀI LIỆU NỘI BỘ]. KHÔNG bịa câu trả lời.
+                2. Nếu KHÔNG CÓ THÔNG TIN, PHẢI TỪ CHỐI bằng câu: "Tôi chưa được cập nhật thông tin này."
+                [LỊCH SỬ CHAT (Chỉ tham khảo ngữ cảnh)]: {history_text}
+                [TÀI LIỆU NỘI BỘ (Quyết định câu trả lời)]: {context}
+                [CÂU HỎI MỚI]: {data.question}
+                [YÊU CẦU ĐẶC BIỆT]: Gợi ý 3 câu hỏi tiếp theo đặt dưới ký hiệu ---SUGGESTIONS---
+                """
+            
+            # Chỉ gọi API của Google khi thực sự cần thiết (Luồng này tốn Token)
+            ai_answer_raw = generate_content_with_fallback(prompt)
+            ai_answer = ai_answer_raw
+            follow_ups = []
+            
+        # =========================================================
+        
         current_time = datetime.now()
-        ai_answer = ai_answer_raw
-        follow_ups = []
-
         # ĐÃ FIX LỖI SỐ 2: Xóa rác PDF khi đặt báo thức
         if "[[REMINDER:" in ai_answer_raw:
+        # ... (Phần code bên dưới giữ nguyên)
             try:
                 sources = [] # <-- FIX: XÓA SẠCH NGUỒN TÀI LIỆU BỊ VƯỚNG
                 reminder_part = ai_answer_raw.split("[[REMINDER:")[1].split("]]")[0].strip()
@@ -328,7 +401,7 @@ async def ask_with_file(username: str, role: str = 'staff', question: str = Form
 
             system_prompt = f"""
             Bạn là trợ lý AI thông minh của ABC TECH. Thời gian hiện tại: {current_time_str}
-            Nội dung tệp: {extracted_text[:15000]}...
+            Nội dung tệp: {extracted_text[:2500]}...
             Câu hỏi: "{question}"
             Hãy đọc nội dung kết hợp lịch sử ({history_text}) để trả lời. Nếu yêu cầu nhắc nhở, thêm tag [[REMINDER: {{"task": "...", "time": "YYYY-MM-DD HH:MM:SS"}}]]
             """
@@ -828,4 +901,6 @@ def check_reminders_loop():
 threading.Thread(target=check_reminders_loop, daemon=True).start()
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    import os
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)

@@ -1,14 +1,27 @@
+# 1. ÉP TẢI BẢN CPU CHO AI (Giảm từ 2.5GB xuống 200MB)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+
+# 2. Khung Backend & Môi trường
 fastapi
 uvicorn
-google-generativeai
 python-multipart
-PyPDF2
-Pillow
 pydantic
+python-dotenv  
+
+# 3. Model & AI
+google-generativeai
+
+# 4. Langchain & Vector DB
 langchain
+langchain-community
 langchain-chroma
 chromadb
 sentence-transformers
-langchain-google-genai
 langchain-huggingface
 
+# 5. Xử lý File (PDF, Ảnh, Text)
+PyPDF2
+pypdf
+Pillow
