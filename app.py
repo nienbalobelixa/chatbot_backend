@@ -188,7 +188,7 @@ class FeedbackReq(BaseModel): session_id: str; bot_response: str; rating: str; r
 class UpdateRoleReq(BaseModel): role: str
 class AnswerReq(BaseModel): question: str; answer: str
 class EditFaqReq(BaseModel): question: str; answer: str
-class BroadcastReq(BaseModel): message: str
+class BroadcastReq(BaseModel): message: str; admin_username: str = None
 
 @app.post("/feedback")
 def save_feedback(req: FeedbackReq, username: str = "guest"):
@@ -869,14 +869,19 @@ def broadcast_to_company(req: BroadcastReq):
         current_time = datetime.now().strftime("%H:%M %d/%m")
         final_message = f"📢 **[THÔNG BÁO TỪ BAN GIÁM ĐỐC]**\n\n{req.message}"
 
+        sent_count = 0
         for u in users:
             username = u[0]
+            # Bỏ qua admin người gửi
+            if req.admin_username and username == req.admin_username:
+                continue
             c.execute("INSERT INTO notifications (username, message, is_read, session_id, timestamp) VALUES (?, ?, 0, 'broadcast', ?)",
                       (username, final_message, current_time))
+            sent_count += 1
         
         conn.commit()
         conn.close()
-        return {"status": "success", "total_sent": len(users)}
+        return {"status": "success", "total_sent": sent_count}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

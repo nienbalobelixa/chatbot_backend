@@ -24,3 +24,6 @@ langchain-google-genai
 PyPDF2
 pypdf
 Pillow
+
+# xử lý file DTB
+psycopg2-binary

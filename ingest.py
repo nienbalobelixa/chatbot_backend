@@ -64,7 +64,7 @@ def main():
         shutil.rmtree(DB)
         
     # 4. Khởi tạo Embedding (DÙNG GOOGLE API)
-    print("🧠 Đang khởi tạo mô hình Embedding Google (Siêu nhẹ)...")
+    print("🧠 Đang hởi tạo mô hình Embedding Google (Siêu nhẹ)...")
     api_key = os.environ.get("GEMINI_API_KEY_1") or os.environ.get("GEMINI_API_KEY")
     embedding = GoogleGenerativeAIEmbeddings(
         model="models/gemini-embedding-001", 
