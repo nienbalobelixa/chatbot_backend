@@ -7,11 +7,10 @@ import ast
 import subprocess
 from datetime import datetime, timedelta
 from typing import Optional
-import re 
+import re
 import json
 import threading
 import time
-
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -19,20 +18,16 @@ from pydantic import BaseModel
 import uvicorn
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
-
-
 from rag import search_docs, check_exact_faq_match
 from routers.onboarding import router as onboarding_router
-import logging 
+import logging
 from dotenv import load_dotenv
-
 import PyPDF2
 import io
 import PIL.Image
+from fastapi import BackgroundTasks
 
-from fastapi import BackgroundTasks 
 app = FastAPI()
-
 os.makedirs("documents", exist_ok=True)
 os.makedirs("avatars", exist_ok=True)
 os.makedirs("vector_db", exist_ok=True)
@@ -40,33 +35,33 @@ os.makedirs("vector_db", exist_ok=True)
 class EndpointFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        # Ẩn toàn bộ log chứa các đường dẫn gọi liên tục (polling)
         if "/notifications/" in msg or "/admin/unanswered" in msg:
             return False
         return True
 
-# Áp dụng bộ lọc cho Uvicorn
 logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], 
-                   allow_credentials=False, 
-                   allow_methods=["*"], 
+app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                   allow_credentials=False,
+                   allow_methods=["*"],
                    allow_headers=["*"])
+
 app.include_router(onboarding_router)
 
 DOCS_DIR = "documents"
 os.makedirs(DOCS_DIR, exist_ok=True)
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 AVATARS_DIR = os.path.join(BASE_DIR, "avatars")
 os.makedirs(AVATARS_DIR, exist_ok=True)
 app.mount("/avatars", StaticFiles(directory=AVATARS_DIR), name="avatars")
-# MỞ CỔNG CHO PHÉP XEM/TẢI TÀI LIỆU PDF/TXT
 app.mount("/files", StaticFiles(directory=DOCS_DIR), name="files")
 
 load_dotenv()
 
-# --- BẮT ĐẦU ĐOẠN CODE THAY THẾ ---
+# =====================================================================
+# 🚀 HỆ THỐNG QUẢN LÝ BĂNG ĐẠN API VÀ FALLBACK THÔNG MINH
+# =====================================================================
+
 raw_keys_dict = {
     "Key Mặc định": os.getenv("GEMINI_API_KEY"),
     "Key 1": os.getenv("GEMINI_API_KEY_1"),
@@ -76,82 +71,71 @@ raw_keys_dict = {
     "Key 5": os.getenv("GEMINI_API_KEY_5")
 }
 
-# Lọc bỏ các key rỗng, tạo danh sách các Key hợp lệ kèm Tên
 VALID_KEYS = [(name, key) for name, key in raw_keys_dict.items() if key]
-print(f"🚀 Băng đạn đã nạp: {len(VALID_KEYS)} API Keys")
+print(f" 🚀  Băng đạn đã nạp: {len(VALID_KEYS)} API Keys")
 
 current_key_idx = 0
-CACHED_MODELS = [] # Bộ nhớ đệm lưu danh sách model để không phải gọi Google API liên tục
 
 def get_optimized_models():
-    """Tự động lấy danh sách model từ API và sắp xếp ưu tiên bản Flash (ít tốn token)"""
-    global CACHED_MODELS
-    if CACHED_MODELS:
-        return CACHED_MODELS
-    
-    try:
-        available_models = []
-        # Lấy danh sách toàn bộ model từ tài khoản Google
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                name = m.name.replace('models/', '')
-                available_models.append(name)
-        
-        # THUẬT TOÁN ƯU TIÊN: Lọc các model chứa chữ "flash" lên đầu
-        flash_list = [m for m in available_models if "flash" in m.lower()]
-        pro_list = [m for m in available_models if "pro" in m.lower() and "flash" not in m.lower()]
-        others = [m for m in available_models if m not in flash_list and m not in pro_list]
-        
-        # Ghép mảng: Flash bắn trước -> Pro dự phòng -> Các loại khác
-        CACHED_MODELS = flash_list + pro_list + others
-        print(f"🤖 Đã tự động cập nhật {len(CACHED_MODELS)} model. (Ưu tiên số 1: {CACHED_MODELS[0]})")
-        return CACHED_MODELS
-        
-    except Exception as e:
-        print(f"⚠️ Lỗi khi quét danh sách model: {e}. Đang dùng danh sách dự phòng cứng.")
-        return ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"]
+    """
+    Cập nhật danh sách "Đội hình ra sân" khớp 100% với tài khoản của sếp:
+    - Tiên phong: gemini-2.5-flash (Dùng 20 lượt VIP đầu tiên).
+    - Chủ lực gánh team: gemma-3-27b-it (Thông minh nhất dòng Gemma, bao trọn 14.400 lượt).
+    - Dự phòng: gemma-3-12b-it (Đề phòng con 27B bị lỗi mạng).
+    """
+    return [
+        "gemini-2.5-flash", 
+        "gemma-3-27b-it",    # Bản 27 Tỷ tham số chuyên dùng để Chat (it = instruction tuned)
+        "gemma-3-12b-it"     
+    ]
 
 def generate_content_with_fallback(prompt) -> str:
     global current_key_idx
-
     if not VALID_KEYS:
         return "Lỗi Server: Không tìm thấy API Key nào trong file .env!"
 
-    # Ghi nhớ lại vị trí bắt đầu để biết khi nào đã quét hết 1 vòng các Key
-    start_idx = current_key_idx
+    models = get_optimized_models()
 
+    # Vòng lặp 1: Quét qua từng API Key trong băng đạn
     for attempt in range(len(VALID_KEYS)):
         key_name, current_key = VALID_KEYS[current_key_idx]
         genai.configure(api_key=current_key)
-        
-        dynamic_models = get_optimized_models()
 
-        # [QUAN TRỌNG]: Vừa lấy Key hiện tại ra xài, lập tức chuyển kim chỉ nam sang Key tiếp theo cho lần hỏi sau
-        current_key_idx = (current_key_idx + 1) % len(VALID_KEYS)
-
-        for model_name in dynamic_models:
-            print(f" 🔄  Đang xử lý... | Dùng: [{key_name}] | Mô hình: [{model_name}]")
+        # Vòng lặp 2: Quét qua từng mô hình AI
+        for model_name in models:
+            print(f"  🔄  Đang xử lý... | Dùng: [{key_name}] | Mô hình: [{model_name}]")
             try:
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(prompt)
-
-                print(f" ✅  THÀNH CÔNG   | Đã trả lời bằng [{key_name}] - [{model_name}]")
+                print(f"  ✅  THÀNH CÔNG   | Đã trả lời bằng [{key_name}] - [{model_name}]")
                 return response.text
 
             except ResourceExhausted:
-                # Key này hết hạn mức, bẻ gãy vòng lặp model để chuyển sang vòng lặp Key tiếp theo
-                print(f" ⚠️  HẾT TOKEN    | [{key_name}] đã kiệt sức với {model_name}! Đang đổi súng...")
-                break 
-
-            except Exception as e:
-                # Lỗi mạng hoặc model bảo trì, thử model tiếp theo trên CÙNG Key này
-                print(f" ❌  LỖI KHÁC     | [{key_name}] - [{model_name}] gặp sự cố: {str(e)[:50]}...")
+                # Nếu model này hết Token, KHÔNG break vội!
+                # Có thể gemini-2.5-flash hết 20 lượt, nhưng gemini-1.5-flash vẫn còn 1500 lượt.
+                print(f"  ⚠️  HẾT HẠN MỨC  | [{model_name}] kiệt sức. Chuyển model khác...")
                 continue
 
-    print(" 🚨  BÁO ĐỘNG ĐỎ  | Toàn bộ hệ thống API Key đã cạn kiệt!")
-    return "Hệ thống AI hiện đang quá tải do hết sạch Token trên tất cả các Key dự phòng. Vui lòng đợi 1 phút rồi thử lại."
+            except Exception as e:
+                error_msg = str(e).lower()
+                print(f"  ❌  LỖI KHÁC     | [{key_name}] - [{model_name}]: {error_msg[:50]}...")
+                
+                # PHANH KHẨN CẤP: Chống Spam API của Google nếu nội dung vi phạm
+                if "400" in error_msg or "safety" in error_msg:
+                    return "Câu hỏi vi phạm chính sách an toàn hoặc quá phức tạp. Vui lòng thử lại!"
+                
+                continue # Lỗi mạng bình thường thì thử tiếp
 
-# --- KẾT THÚC ĐOẠN CODE THAY THẾ ---
+        # Nếu chạy hết tất cả các model mà vẫn không có kết quả -> Key này đã cạn kiệt hoàn toàn
+        print(f"  🚨  CHUYỂN KEY   | [{key_name}] đã hết sạch Token. Nạp súng mới!")
+        current_key_idx = (current_key_idx + 1) % len(VALID_KEYS)
+
+    print("  🚨  BÁO ĐỘNG ĐỎ  | Toàn bộ hệ thống API Key đã cạn kiệt!")
+    return "Hệ thống AI hiện đang quá tải do hết sạch Token trên tất cả các Key. Vui lòng đợi hoặc nạp thêm Key."
+
+# =====================================================================
+#  DATABASE & ENDPOINTS
+# =====================================================================
 
 def init_db():
     conn = sqlite3.connect('enterprise.db')
@@ -163,13 +147,13 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS unanswered_questions (id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT, username TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS feedbacks (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, username TEXT, bot_response TEXT, rating TEXT, reason TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, session_id TEXT, message TEXT, is_read BOOLEAN DEFAULT 0, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS reminders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, task TEXT, remind_at DATETIME, is_done BOOLEAN DEFAULT 0, is_notified BOOLEAN DEFAULT 0)''')
+        id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, task TEXT, remind_at DATETIME, is_done BOOLEAN DEFAULT 0, is_notified BOOLEAN DEFAULT 0)''')
     try: c.execute("ALTER TABLE unanswered_questions ADD COLUMN session_id TEXT")
-    except: pass 
+    except: pass
     try: c.execute("ALTER TABLE users ADD COLUMN is_onboarded BOOLEAN DEFAULT 0")
-    except: pass 
+    except: pass
     try: c.execute("ALTER TABLE users ADD COLUMN avatar TEXT")
     except: pass
     try:
@@ -228,37 +212,21 @@ def rewrite_query(original_query: str, history_text: str = "") -> str:
         return generate_content_with_fallback(prompt).strip()
     except Exception: return original_query
 
-# def get_all_faqs():
-#     faq_text = ""
-#     try:
-#         conn = sqlite3.connect('enterprise.db')
-#         c = conn.cursor()
-#         c.execute("SELECT file_name FROM document_permissions WHERE file_name LIKE 'FAQ_%'")
-#         faqs = c.fetchall()
-#         conn.close()
-#         for r in faqs:
-#             filepath = os.path.join(DOCS_DIR, r[0])
-#             if os.path.exists(filepath):
-#                 with open(filepath, "r", encoding="utf-8") as f:
-#                     faq_text += f.read() + "\n"
-#     except: pass
-#     return faq_text
-
 @app.post("/ask")
-def ask_ai(data: Question, username: str = "guest"): 
+def ask_ai(data: Question, username: str = "guest"):
     try:
         conn = sqlite3.connect('enterprise.db')
         c = conn.cursor()
         c.execute("SELECT role FROM users WHERE username = ?", (username,))
         row = c.fetchone()
         user_role = row[0] if row else 'staff'
-        
+
         s_id = data.session_id
         is_new_session = False
         if not s_id or s_id == "null" or s_id == "":
             s_id = str(uuid.uuid4())
             is_new_session = True
-
+        
         history_text = ""
         if not is_new_session:
             c.execute("SELECT role, content FROM chat_history WHERE session_id = ? ORDER BY id DESC LIMIT 4", (s_id,))
@@ -267,95 +235,84 @@ def ask_ai(data: Question, username: str = "guest"):
             for r, text_content in raw_history:
                 prefix = "Nhân viên" if r == "user" else "AI"
                 history_text += f"{prefix}: {text_content[:500]}...\n"
-
+        
         optimized_query = data.question
-
+        
         # =========================================================
-        # TỐI ƯU SIÊU TỐC: KIỂM TRA BỘ NHỚ ĐỆM FAQ (SEMANTIC CACHE)
+        # TỐI ƯU SIÊU TỐC: KIỂM TRA BỘ NHỚ ĐỆM FAQ
         # =========================================================
         direct_answer = check_exact_faq_match(optimized_query, user_role=user_role)
-        
+
         if direct_answer:
-            # --- TRƯỜNG HỢP 1: ADMIN ĐÃ TỪNG TRẢ LỜI ---
             ai_answer = direct_answer
-            # Ghi rõ nguồn là từ Admin để nhân viên yên tâm
-            sources = ["Giải đáp trực tiếp từ Admin"] 
+            sources = ["Giải đáp trực tiếp từ Admin"]
             follow_ups = []
-            ai_answer_raw = ai_answer 
-            
+            ai_answer_raw = ai_answer
         else:
-            # --- TRƯỜNG HỢP 2: TÌM TRONG TÀI LIỆU SÁCH VỞ ---
             rag_res = search_docs(optimized_query, user_role=user_role)
             context = rag_res.get("answer", "")
             raw_sources = rag_res.get("sources", [])
-            
-            # Đánh dấu rõ các nguồn này là từ Tài Liệu (PDF, DOCX...)
-            sources = [f"Tài liệu: {s}" for s in raw_sources]
 
-            current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            sources = raw_sources
+            
             if user_role == 'admin':
                 prompt = f"""
-                Bạn là Trợ lý Hành chính & Nhân sự (HR Copilot) cấp cao của ABC TECH.
-                Nhiệm vụ: LÊN DÀN Ý, SOẠN THẢO VĂN BẢN, VIẾT EMAIL, THÔNG BÁO. Hành văn lịch sự.
-                [TÀI LIỆU NỘI BỘ]: {context}
-                [QUY TẮC NHẮC VIỆC]:
-                Nếu Giám đốc yêu cầu nhắc nhở, thêm chính xác: [[REMINDER: {{"task": "nội dung ngắn gọn", "time": "YYYY-MM-DD HH:MM:SS"}}]]
-                [YÊU CẦU TỪ GIÁM ĐỐC]: {data.question}
+Bạn là Trợ lý Hành chính & Nhân sự (HR Copilot) cấp cao của ABC TECH.
+Nhiệm vụ: LÊN DÀN Ý, SOẠN THẢO VĂN BẢN, VIẾT EMAIL, THÔNG BÁO. Hành văn lịch sự.
+[TÀI LIỆU NỘI BỘ]: {context}
+[QUY TẮC NHẮC VIỆC]:
+Nếu Giám đốc yêu cầu nhắc nhở, thêm chính xác: [[REMINDER: {{"task": "nội dung ngắn gọn", "time": "YYYY-MM-DD HH:MM:SS"}}]]
+[YÊU CẦU TỪ GIÁM ĐỐC]: {data.question}
                 """
             else:
                 prompt = f"""
-                Bạn là Trợ lý AI Nội bộ của ABC TECH. KHÔNG PHẢI chatbot tâm sự.
-                [QUY TẮC SINH TỬ]:
-                1. CHỈ ĐƯỢC PHÉP trả lời dựa trên [TÀI LIỆU NỘI BỘ]. KHÔNG bịa câu trả lời.
-                2. Nếu KHÔNG CÓ THÔNG TIN, PHẢI TỪ CHỐI bằng câu: "Tôi chưa được cập nhật thông tin này."
-                [LỊCH SỬ CHAT (Chỉ tham khảo ngữ cảnh)]: {history_text}
-                [TÀI LIỆU NỘI BỘ (Quyết định câu trả lời)]: {context}
-                [CÂU HỎI MỚI]: {data.question}
-                [YÊU CẦU ĐẶC BIỆT]: Gợi ý 3 câu hỏi tiếp theo đặt dưới ký hiệu ---SUGGESTIONS---
+Bạn là Trợ lý AI Nội bộ của ABC TECH. KHÔNG PHẢI chatbot tâm sự.
+[QUY TẮC SINH TỬ]:
+1. CHỈ ĐƯỢC PHÉP trả lời dựa trên [TÀI LIỆU NỘI BỘ]. KHÔNG bịa câu trả lời.
+2. Nếu KHÔNG CÓ THÔNG TIN, PHẢI TỪ CHỐI bằng câu: "Tôi chưa được cập nhật thông tin này."
+[LỊCH SỬ CHAT (Chỉ tham khảo ngữ cảnh)]: {history_text}
+[TÀI LIỆU NỘI BỘ (Quyết định câu trả lời)]: {context}
+[CÂU HỎI MỚI]: {data.question}
+[YÊU CẦU ĐẶC BIỆT]: Gợi ý 3 câu hỏi tiếp theo đặt dưới ký hiệu ---SUGGESTIONS---
                 """
-            
-            # Chỉ gọi API của Google khi thực sự cần thiết (Luồng này tốn Token)
+
             ai_answer_raw = generate_content_with_fallback(prompt)
             ai_answer = ai_answer_raw
             follow_ups = []
-            
-        # =========================================================
-        
+
         current_time = datetime.now()
-        # ĐÃ FIX LỖI SỐ 2: Xóa rác PDF khi đặt báo thức
+        
         if "[[REMINDER:" in ai_answer_raw:
-        # ... (Phần code bên dưới giữ nguyên)
             try:
-                sources = [] # <-- FIX: XÓA SẠCH NGUỒN TÀI LIỆU BỊ VƯỚNG
+                sources = []
                 reminder_part = ai_answer_raw.split("[[REMINDER:")[1].split("]]")[0].strip()
                 rem_data = json.loads(reminder_part)
                 c.execute("INSERT INTO reminders (username, task, remind_at) VALUES (?, ?, ?)", (username, rem_data['task'], rem_data['time']))
                 ai_answer_raw = ai_answer_raw.split("[[REMINDER:")[0].strip()
                 ai_answer = ai_answer_raw
             except Exception as e: print(f"Lỗi phân tích JSON nhắc việc: {e}")
-
+            
         if "---SUGGESTIONS---" in ai_answer_raw:
             parts = ai_answer_raw.split("---SUGGESTIONS---")
-            ai_answer = parts[0].strip() 
+            ai_answer = parts[0].strip()
             follow_ups = re.findall(r'^\d+\.\s*(.+)', parts[1].strip(), re.MULTILINE)
-
+            
         lower_answer = ai_answer.lower()
         if user_role != 'admin' and ("chưa được cập nhật" in lower_answer or "không có thông tin" in lower_answer):
-            sources = [] 
+            sources = []
             try: c.execute("INSERT INTO unanswered_questions (question, username, session_id) VALUES (?, ?, ?)", (data.question, username, s_id))
             except: pass
-
+            
         if is_new_session:
             title = data.question[:30] + "..."
             c.execute("INSERT INTO chat_sessions (id, username, title, last_active) VALUES (?, ?, ?, ?)", (s_id, username, title, current_time))
-
-        c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (?, ?, ?, ?, ?)", (s_id, username, "user", data.question, "[]"))
+            c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (?, ?, ?, ?, ?)", (s_id, username, "user", data.question, "[]"))
+            
         c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (?, ?, ?, ?, ?)", (s_id, username, "bot", ai_answer, str(sources)))
         c.execute("UPDATE chat_sessions SET last_active = ? WHERE id = ?", (current_time, s_id))
-        
+
         conn.commit()
         conn.close()
-
         return { "answer": ai_answer, "sources": sources, "follow_ups": follow_ups, "session_id": s_id, "time": current_time.strftime("%H:%M - %d/%m/%Y") }
     except Exception as e:
         return {"answer": f"Lỗi hệ thống AI: {str(e)}", "status": "error"}
@@ -368,10 +325,9 @@ async def ask_with_file(username: str, role: str = 'staff', question: str = Form
         if not s_id or s_id == "null" or s_id == "":
             s_id = str(uuid.uuid4())
             is_new_session = True
-
+            
         conn = sqlite3.connect('enterprise.db')
         c = conn.cursor()
-
         history_text = ""
         if not is_new_session:
             c.execute("SELECT role, content FROM chat_history WHERE session_id = ? ORDER BY id DESC LIMIT 4", (s_id,))
@@ -380,20 +336,21 @@ async def ask_with_file(username: str, role: str = 'staff', question: str = Form
             for r, text_content in raw_history:
                 prefix = "Nhân viên" if r == "user" else "AI"
                 history_text += f"{prefix}: {text_content[:500]}...\n"
-
+                
         file_extension = file.filename.split('.')[-1].lower()
         ai_prompt_data = None
         extracted_text = ""
         current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+        
         if file_extension in ['jpg', 'jpeg', 'png']:
             image_bytes = await file.read()
             img = PIL.Image.open(io.BytesIO(image_bytes))
             system_prompt = f"""
-            Bạn là trợ lý AI thông minh của ABC TECH. Thời gian hiện tại: {current_time_str}
-            Câu hỏi: "{question}"
-            Lịch sử trò chuyện: {history_text}
-            Hãy quan sát thật kỹ bức ảnh và trả lời chi tiết. Nếu yêu cầu nhắc nhở, thêm tag [[REMINDER: {{"task": "...", "time": "YYYY-MM-DD HH:MM:SS"}}]]
+Bạn là trợ lý AI thông minh của ABC TECH. Thời gian hiện tại: {current_time_str}
+Câu hỏi: "{question}"
+Lịch sử trò chuyện: {history_text}
+Hãy quan sát thật kỹ bức ảnh và trả lời chi tiết.
+Nếu yêu cầu nhắc nhở, thêm tag [[REMINDER: {{"task": "...", "time": "YYYY-MM-DD HH:MM:SS"}}]]
             """
             ai_prompt_data = [img, system_prompt]
         else:
@@ -405,21 +362,21 @@ async def ask_with_file(username: str, role: str = 'staff', question: str = Form
                 extracted_text = (await file.read()).decode('utf-8')
             else:
                 return {"answer": f"Định dạng {file_extension} hiện chưa hỗ trợ."}
-
+                
             system_prompt = f"""
-            Bạn là trợ lý AI thông minh của ABC TECH. Thời gian hiện tại: {current_time_str}
-            Nội dung tệp: {extracted_text[:2500]}...
-            Câu hỏi: "{question}"
-            Hãy đọc nội dung kết hợp lịch sử ({history_text}) để trả lời. Nếu yêu cầu nhắc nhở, thêm tag [[REMINDER: {{"task": "...", "time": "YYYY-MM-DD HH:MM:SS"}}]]
+Bạn là trợ lý AI thông minh của ABC TECH. Thời gian hiện tại: {current_time_str}
+Nội dung tệp: {extracted_text[:2500]}...
+Câu hỏi: "{question}"
+Hãy đọc nội dung kết hợp lịch sử ({history_text}) để trả lời.
+Nếu yêu cầu nhắc nhở, thêm tag [[REMINDER: {{"task": "...", "time": "YYYY-MM-DD HH:MM:SS"}}]]
             """
             ai_prompt_data = system_prompt
-
+            
         ai_answer_raw = generate_content_with_fallback(ai_prompt_data)
         current_time = datetime.now()
         ai_answer = ai_answer_raw
         follow_ups = []
-
-        # ĐÃ FIX LỖI SỐ 2: Tương tự như trên
+        
         if "[[REMINDER:" in ai_answer_raw:
             try:
                 reminder_part = ai_answer_raw.split("[[REMINDER:")[1].split("]]")[0].strip()
@@ -428,49 +385,36 @@ async def ask_with_file(username: str, role: str = 'staff', question: str = Form
                 ai_answer_raw = ai_answer_raw.split("[[REMINDER:")[0].strip()
                 ai_answer = ai_answer_raw
             except Exception as e: print(f"Lỗi phân tích JSON: {e}")
-
+            
         if "---SUGGESTIONS---" in ai_answer_raw:
             parts = ai_answer_raw.split("---SUGGESTIONS---")
-            ai_answer = parts[0].strip() 
+            ai_answer = parts[0].strip()
             follow_ups = re.findall(r'^\d+\.\s*(.+)', parts[1].strip(), re.MULTILINE)
-
+            
         if is_new_session:
             title = (question if question.strip() else f"Gửi tệp {file.filename}")[:30] + "..."
             c.execute("INSERT INTO chat_sessions (id, username, title, last_active) VALUES (?, ?, ?, ?)", (s_id, username, title, current_time))
-
-        user_content = question if question.strip() else f"[Đã đính kèm tệp: {file.filename}]"
-        c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (?, ?, ?, ?, ?)", (s_id, username, "user", user_content, "[]"))
-        # Giữ lại nguồn filename vì đây là xử lý file
+            user_content = question if question.strip() else f"[Đã đính kèm tệp: {file.filename}]"
+            c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (?, ?, ?, ?, ?)", (s_id, username, "user", user_content, "[]"))
+            
         c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (?, ?, ?, ?, ?)", (s_id, username, "bot", ai_answer, str([file.filename])))
         c.execute("UPDATE chat_sessions SET last_active = ? WHERE id = ?", (current_time, s_id))
-        
+
         conn.commit()
         conn.close()
-
         return { "answer": ai_answer, "sources": [file.filename], "follow_ups": follow_ups, "session_id": s_id, "time": current_time.strftime("%H:%M - %d/%m/%Y") }
     except Exception as e:
         return {"answer": f"Lỗi xử lý tệp Backend: {str(e)}", "status": "error"}
 
-# ==============================
-# 🔐 AUTH & QUẢN LÝ SESSIONS
-# ==============================
 @app.post("/register")
 async def register(user: User):
-    # 1. Chuẩn hóa dữ liệu (Xóa khoảng trắng thừa ở 2 đầu)
     username = user.username.strip()
     password = user.password.strip()
-
-    # 2. KIỂM TRA ĐIỀU KIỆN (VALIDATION)
-    if len(username) < 3:
-        return {"status": "error", "message": "Tên đăng nhập phải có ít nhất 3 ký tự!"}
-    if len(password) < 6:
-        return {"status": "error", "message": "Mật khẩu phải có ít nhất 6 ký tự để đảm bảo an toàn!"}
-    if not username.isalnum():
-        return {"status": "error", "message": "Tên đăng nhập không được chứa ký tự đặc biệt hoặc dấu cách!"}
-
-    # 3. Mã hóa mật khẩu một chiều (SHA-256)
-    hashed = hashlib.sha256(password.encode()).hexdigest()
+    if len(username) < 3: return {"status": "error", "message": "Tên đăng nhập phải có ít nhất 3 ký tự!"}
+    if len(password) < 6: return {"status": "error", "message": "Mật khẩu phải có ít nhất 6 ký tự để đảm bảo an toàn!"}
+    if not username.isalnum(): return {"status": "error", "message": "Tên đăng nhập không được chứa ký tự đặc biệt hoặc dấu cách!"}
     
+    hashed = hashlib.sha256(password.encode()).hexdigest()
     try:
         conn = sqlite3.connect('enterprise.db')
         c = conn.cursor()
@@ -479,7 +423,6 @@ async def register(user: User):
         conn.close()
         return {"status": "success", "message": "Đăng ký tài khoản thành công!"}
     except sqlite3.IntegrityError:
-        # Bắt lỗi Unique (Tên đăng nhập đã bị người khác lấy)
         return {"status": "error", "message": "Tên đăng nhập này đã tồn tại. Vui lòng chọn tên khác!"}
     except Exception as e:
         return {"status": "error", "message": f"Lỗi hệ thống: {str(e)}"}
@@ -488,28 +431,23 @@ async def register(user: User):
 async def login(user: User):
     username = user.username.strip()
     password = user.password.strip()
-
-    if not username or not password:
-        return {"status": "error", "message": "Vui lòng nhập đầy đủ Tên đăng nhập và Mật khẩu!"}
-
-    hashed = hashlib.sha256(password.encode()).hexdigest()
+    if not username or not password: return {"status": "error", "message": "Vui lòng nhập đầy đủ Tên đăng nhập và Mật khẩu!"}
     
+    hashed = hashlib.sha256(password.encode()).hexdigest()
     conn = sqlite3.connect('enterprise.db')
     c = conn.cursor()
     c.execute("SELECT username, role, is_onboarded FROM users WHERE username = ? AND password = ?", (username, hashed))
     record = c.fetchone()
     conn.close()
-    
+
     if record:
         return {
-            "status": "success", 
-            "username": record[0], 
-            "role": record[1], 
+            "status": "success",
+            "username": record[0],
+            "role": record[1],
             "is_onboarded": bool(record[2]),
             "message": "Đăng nhập thành công!"
         }
-    
-    # Không báo rõ là sai tên hay sai pass để chống hacker dò tìm tài khoản
     return {"status": "error", "message": "Sai tên đăng nhập hoặc mật khẩu!"}
 
 @app.put("/users/{username}/onboarded")
@@ -558,29 +496,25 @@ def summarize_session(session_id: str):
         summary_text = generate_content_with_fallback(prompt)
         return {"summary": summary_text}
     except Exception: return {"summary": "Lỗi hệ thống."}
-# --- LẤY DANH SÁCH THÔNG BÁO (CHỈ LẤY CÁI CHƯA VÀO THÙNG RÁC) ---
+
 @app.get("/notifications/{username}")
 def get_notifications(username: str):
     conn = sqlite3.connect('enterprise.db')
     c = conn.cursor()
-    # Thêm điều kiện is_trashed = 0
     c.execute("SELECT id, session_id, message, is_read, timestamp FROM notifications WHERE username = ? AND is_trashed = 0 ORDER BY timestamp DESC", (username,))
     rows = c.fetchall()
     conn.close()
     return [{"id": r[0], "session_id": r[1], "message": r[2], "is_read": bool(r[3]), "time": r[4]} for r in rows]
 
-# --- LẤY DANH SÁCH THÙNG RÁC ---
 @app.get("/notifications/{username}/trash")
 def get_trashed_notifications(username: str):
     conn = sqlite3.connect('enterprise.db')
     c = conn.cursor()
-    # Thêm điều kiện is_trashed = 1
     c.execute("SELECT id, session_id, message, is_read, timestamp FROM notifications WHERE username = ? AND is_trashed = 1 ORDER BY timestamp DESC", (username,))
     rows = c.fetchall()
     conn.close()
     return [{"id": r[0], "session_id": r[1], "message": r[2], "is_read": bool(r[3]), "time": r[4]} for r in rows]
 
-# --- CHUYỂN VÀO THÙNG RÁC (XÓA MỀM) ---
 @app.put("/notifications/{notif_id}/trash")
 def trash_notification(notif_id: int):
     conn = sqlite3.connect('enterprise.db')
@@ -590,7 +524,6 @@ def trash_notification(notif_id: int):
     conn.close()
     return {"status": "success"}
 
-# --- KHÔI PHỤC TỪ THÙNG RÁC ---
 @app.put("/notifications/{notif_id}/restore")
 def restore_notification(notif_id: int):
     conn = sqlite3.connect('enterprise.db')
@@ -600,7 +533,6 @@ def restore_notification(notif_id: int):
     conn.close()
     return {"status": "success"}
 
-# --- ĐÁNH DẤU ĐÃ ĐỌC ---
 @app.put("/notifications/{notif_id}/read")
 def mark_notif_read(notif_id: int):
     conn = sqlite3.connect('enterprise.db')
@@ -610,7 +542,6 @@ def mark_notif_read(notif_id: int):
     conn.close()
     return {"status": "success"}
 
-# --- XÓA VĨNH VIỄN (XÓA CỨNG) ---
 @app.delete("/notifications/{notif_id}")
 def delete_notification(notif_id: int):
     conn = sqlite3.connect('enterprise.db')
@@ -619,6 +550,7 @@ def delete_notification(notif_id: int):
     conn.commit()
     conn.close()
     return {"status": "success"}
+
 @app.post("/admin/answer_unanswered/{q_id}")
 def answer_unanswered_question(q_id: int, req: AnswerReq):
     conn = sqlite3.connect('enterprise.db')
@@ -627,23 +559,23 @@ def answer_unanswered_question(q_id: int, req: AnswerReq):
         c.execute("SELECT session_id, question, username FROM unanswered_questions WHERE id = ?", (q_id,))
         row = c.fetchone()
         if not row: return {"status": "error", "message": "Không tìm thấy câu hỏi"}
-        
+
         session_id, question, username = row
         current_time = datetime.now()
         filename = f"FAQ_{q_id}_{current_time.strftime('%Y%m%d%H%M%S')}.txt"
         filepath = os.path.join(DOCS_DIR, filename)
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(f"Câu hỏi: {question}\nCâu trả lời: {req.answer}\n")
-            
+
         c.execute("INSERT OR REPLACE INTO document_permissions (file_name, required_role) VALUES (?, 'staff')", (filename,))
-        
+
         if session_id:
-            notification_msg = f"🔔 **[Cập nhật từ Quản trị viên]**\n\n*📝 Câu hỏi: {question}*\n\n**👉 Trả lời:** {req.answer}"
+            notification_msg = f" 🔔  **[Cập nhật từ Quản trị viên]**\n\n* 📝  Câu hỏi: {question}*\n\n** 👉  Trả lời:** {req.answer}"
             c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (?, ?, ?, ?, ?)", (session_id, username, "bot", notification_msg, "['Phản hồi từ Admin']"))
             c.execute("UPDATE chat_sessions SET last_active = ? WHERE id = ?", (current_time, session_id))
             short_msg = f"Admin đã giải đáp: '{question[:25]}...'"
             c.execute("INSERT INTO notifications (username, session_id, message, timestamp) VALUES (?, ?, ?, ?)", (username, session_id, short_msg, current_time.strftime("%H:%M %d/%m")))
-
+        
         c.execute("DELETE FROM unanswered_questions WHERE id = ?", (q_id,))
         conn.commit()
         return {"status": "success"}
@@ -705,36 +637,31 @@ def update_faq(file_name: str, req: EditFaqReq):
     try:
         filepath = os.path.join(DOCS_DIR, file_name)
         if not os.path.exists(filepath): return {"status": "error", "message": "File không tồn tại"}
-
         old_question = ""
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
             if "Câu hỏi: " in content and "Câu trả lời: " in content:
                 old_question = content.split("Câu trả lời: ")[0].replace("Câu hỏi: ", "").strip()
-
         with open(filepath, "w", encoding="utf-8") as f: f.write(f"Câu hỏi: {req.question}\nCâu trả lời: {req.answer}\n")
-
         if old_question:
             conn = sqlite3.connect('enterprise.db')
             c = conn.cursor()
-            new_chat_content = f"🔔 **[Cập nhật từ Quản trị viên]**\n\n*📝 Câu hỏi: {req.question}*\n\n**👉 Trả lời:** {req.answer}"
+            new_chat_content = f" 🔔  **[Cập nhật từ Quản trị viên]**\n\n* 📝  Câu hỏi: {req.question}*\n\n** 👉  Trả lời:** {req.answer}"
             c.execute("UPDATE chat_history SET content = ? WHERE role = 'bot' AND content LIKE ?", (new_chat_content, f"%{old_question[:20]}%"))
             short_msg = f"Admin đã CẬP NHẬT: '{req.question[:25]}...'"
             c.execute("UPDATE notifications SET message = ?, is_read = 0, timestamp = CURRENT_TIMESTAMP WHERE message LIKE ?", (short_msg, f"%{old_question[:20]}%"))
             conn.commit()
             conn.close()
-       
         return {"status": "success"}
     except Exception as e: return {"status": "error", "message": str(e)}
-    
+
 @app.delete("/admin/documents/{filename}")
-def delete_document(filename: str, background_tasks: BackgroundTasks): 
+def delete_document(filename: str, background_tasks: BackgroundTasks):
     conn = sqlite3.connect('enterprise.db')
     c = conn.cursor()
     c.execute("DELETE FROM document_permissions WHERE file_name = ?", (filename,))
     conn.commit()
     conn.close()
-
     file_path = os.path.join(DOCS_DIR, filename)
     if os.path.exists(file_path): os.remove(file_path)
     background_tasks.add_task(subprocess.run, ["python", "ingest.py"])
@@ -773,22 +700,22 @@ def get_admin_stats():
     c = conn.cursor()
     today = datetime.now()
     today_str = today.strftime("%Y-%m-%d")
-    
+
     c.execute("SELECT COUNT(*) FROM chat_history WHERE timestamp LIKE ?", (f"{today_str}%",))
     total_msgs = c.fetchone()[0]
-    
+
     c.execute("SELECT COUNT(*) FROM unanswered_questions")
     unanswered = c.fetchone()[0]
-    
+
     last_7_days = []
     for i in range(6, -1, -1):
         day = today - timedelta(days=i)
         day_db_str = day.strftime("%Y-%m-%d")
-        display_day = day.strftime("%d/%m") 
+        display_day = day.strftime("%d/%m")
         c.execute("SELECT COUNT(*) FROM chat_history WHERE timestamp LIKE ?", (f"{day_db_str}%",))
         count = c.fetchone()[0]
         last_7_days.append({"date": display_day, "count": count})
-    
+
     c.execute("SELECT sources FROM chat_history WHERE role = 'bot' AND sources != '[]'")
     all_sources = c.fetchall()
     doc_counts = {}
@@ -797,7 +724,7 @@ def get_admin_stats():
             sources_list = ast.literal_eval(row[0])
             for doc in sources_list: doc_counts[doc] = doc_counts.get(doc, 0) + 1
         except: pass
-    
+
     top_docs = sorted(doc_counts.items(), key=lambda x: x[1], reverse=True)[:5]
     conn.close()
     return { "total_messages_today": total_msgs, "unanswered_count": unanswered, "top_docs": [{"name": k, "count": v} for k, v in top_docs], "last_7_days": last_7_days }
@@ -865,29 +792,23 @@ def broadcast_to_company(req: BroadcastReq):
         c = conn.cursor()
         c.execute("SELECT username FROM users WHERE role != 'locked'")
         users = c.fetchall()
-
         current_time = datetime.now().strftime("%H:%M %d/%m")
-        final_message = f"📢 **[THÔNG BÁO TỪ BAN GIÁM ĐỐC]**\n\n{req.message}"
-
+        final_message = f" 📢  **[THÔNG BÁO TỪ BAN GIÁM ĐỐC]**\n\n{req.message}"
         sent_count = 0
         for u in users:
             username = u[0]
-            # Bỏ qua admin người gửi
             if req.admin_username and username == req.admin_username:
                 continue
             c.execute("INSERT INTO notifications (username, message, is_read, session_id, timestamp) VALUES (?, ?, 0, 'broadcast', ?)",
                       (username, final_message, current_time))
             sent_count += 1
-        
+
         conn.commit()
         conn.close()
         return {"status": "success", "total_sent": sent_count}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# ==============================
-# ⏰ THREAD CHẠY NGẦM QUÉT NHẮC NHỞ
-# ==============================
 def check_reminders_loop():
     while True:
         try:
@@ -896,14 +817,14 @@ def check_reminders_loop():
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             c.execute("SELECT id, username, task FROM reminders WHERE remind_at <= ? AND is_notified = 0", (now,))
             pending = c.fetchall()
-            
+
             for r_id, user, task in pending:
-                msg = f"⏰ **[NHẮC NHỞ CÔNG VIỆC]**: Bạn có việc cần làm ngay bây giờ:\n\n👉 **{task}**"
+                msg = f"⏰ **[NHẮC NHỞ CÔNG VIỆC]**: Bạn có việc cần làm ngay bây giờ:\n\n 👉  **{task}**"
                 cur_time = datetime.now().strftime("%H:%M %d/%m")
                 c.execute("INSERT INTO notifications (username, message, is_read, session_id, timestamp) VALUES (?, ?, 0, 'broadcast', ?)",
                           (user, msg, cur_time))
                 c.execute("UPDATE reminders SET is_notified = 1 WHERE id = ?", (r_id,))
-            
+
             conn.commit()
             conn.close()
         except Exception as e:
