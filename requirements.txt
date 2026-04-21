@@ -25,8 +25,6 @@ PyPDF2
 pypdf
 Pillow
 
-# xử lý file DTB
-psycopg2-binary
 
 #supabase
 psycopg2-binary==2.9.9
