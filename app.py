@@ -79,14 +79,14 @@ current_key_idx = 0
 def get_optimized_models():
     """
     Cập nhật danh sách "Đội hình ra sân" khớp 100% với tài khoản của sếp:
-    - Tiên phong: gemini-2.5-flash (Dùng 20 lượt VIP đầu tiên).
-    - Kế thừa : gemini-3.1-flash-lite (dùng 15 lượt VIP đầu tiên).
+    - Tiên phong: gemini-3-flash-preview (Dùng 20 lượt VIP đầu tiên).
+    - Đánh chính : gemini-3.1-flash-lite-preview (dùng 15 lượt VIP đầu tiên).
     - Chủ lực gánh team: gemma-3-27b-it (Thông minh nhất dòng Gemma, bao trọn 14.400 lượt).
     - Dự phòng: gemma-3-12b-it (Đề phòng con 27B bị lỗi mạng).
     """
     return [
-        "gemini-2.5-flash", 
-        "gemini-3.1-flash-lite",
+        "gemini-3-flash-preview", 
+        "gemini-3.1-flash-lite-preview",
         "gemma-3-27b-it",    # Bản 27 Tỷ tham số chuyên dùng để Chat (it = instruction tuned)
         "gemma-3-12b-it"     
     ]
