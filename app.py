@@ -109,6 +109,10 @@ init_db()
 # 🚀 HỆ THỐNG QUẢN LÝ API AI (FALLBACK THÔNG MINH)
 # =====================================================================
 
+# =====================================================================
+# 🚀 HỆ THỐNG QUẢN LÝ API AI (FALLBACK 3 LỚP ĐÚNG CHUẨN)
+# =====================================================================
+
 VALID_KEYS = [(name, key) for name, key in {
     "Key Mặc định": os.getenv("GEMINI_API_KEY"),
     "Key 1": os.getenv("GEMINI_API_KEY_1"),
@@ -122,7 +126,17 @@ print(f" 🚀  Băng đạn đã nạp: {len(VALID_KEYS)} API Keys")
 current_key_idx = 0
 
 def get_optimized_models():
-    return ["gemini-3-flash-preview","gemini-3.1-flash-lite-preview", "gemma-3-27b-it"]
+    """
+    Đội hình ra sân mới nhất với thế hệ Gemini 3:
+    - Đánh chính: gemini-3-flash-preview (Hỗ trợ 20 câu)
+    - Đánh phụ: gemini-3.1-flash-lite-preview (Gánh team với 500 câu)
+    - Chốt chặn: gemma-3-27b-it (Bất tử 14.400 câu)
+    """
+    return [
+         "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite-preview", 
+        "gemma-3-27b-it"                 
+    ]
 
 def generate_content_with_fallback(prompt) -> str:
     global current_key_idx
@@ -131,13 +145,16 @@ def generate_content_with_fallback(prompt) -> str:
         return "Lỗi Server: Không tìm thấy API Key nào trong file .env!"
     
     models = get_optimized_models()
+    
+    # VÒNG LẶP 1: DUYỆT QUA TỪNG API KEY
     for attempt in range(len(VALID_KEYS)):
         key_name, current_key = VALID_KEYS[current_key_idx]
         genai.configure(api_key=current_key)
         
-        # Xoay vòng kim chỉ nam sang Key tiếp theo cho lần hỏi sau
+        # Mẹo hay của sếp: Lưu lại vị trí Key tiếp theo cho lượt hỏi sau (Load Balancing)
         current_key_idx = (current_key_idx + 1) % len(VALID_KEYS)
         
+        # VÒNG LẶP 2: DUYỆT QUA TỪNG MÔ HÌNH TRÊN CÙNG 1 KEY
         for model_name in models:
             print(f"  🔄  Đang xử lý... | Dùng: [{key_name}] | Mô hình: [{model_name}]")
             try:
@@ -147,18 +164,20 @@ def generate_content_with_fallback(prompt) -> str:
                 return response.text
                 
             except ResourceExhausted:
-                # Bẻ gãy vòng lặp model để chuyển sang Key tiếp theo ngay lập tức
-                print(f"  ⚠️  HẾT TOKEN    | [{key_name}] đã kiệt sức với {model_name}! Đang đổi súng...")
-                break 
+                # SỬA LỖI TẠI ĐÂY: Dùng 'continue' để thử mô hình tiếp theo trên CÙNG 1 KEY
+                print(f"  ⚠️  HẾT TOKEN    | [{key_name}] hết đạn với [{model_name}]! Thử mô hình dự phòng...")
+                continue 
                 
             except Exception as e:
-                # Nếu là lỗi khác (như mạng lag), vẫn cố thử model tiếp theo trên CÙNG Key này
+                # Lỗi mạng hoặc lỗi hệ thống Google, vẫn thử mô hình tiếp theo
                 print(f"  ❌  LỖI KHÁC     | [{key_name}] - [{model_name}] gặp sự cố: {str(e)[:50]}...")
                 continue
                 
+        # Nếu vòng lặp models chạy xong mà vẫn không return được (nghĩa là cả 3 model đều xịt)
+        print(f"  🔁  CHUYỂN KEY   | [{key_name}] đã phế hoàn toàn. Chuyển sang Key tiếp theo!")
+        
     print("  🚨  BÁO ĐỘNG ĐỎ  | Toàn bộ hệ thống API Key đã cạn kiệt!")
     return "Hệ thống AI hiện đang quá tải do hết sạch Token trên tất cả các Key dự phòng. Vui lòng đợi 1 phút rồi thử lại."
-
 # =====================================================================
 # 📡 ENDPOINTS
 # =====================================================================
