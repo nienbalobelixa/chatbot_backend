@@ -1,73 +1,86 @@
 import os
-import time
-from langchain_community.document_loaders import PyPDFLoader
+import shutil
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
+
+# --- XÓA HUGGINGFACE, DÙNG GOOGLE ---
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import Chroma
-from dotenv import load_dotenv
 
-load_dotenv()
+DOCS = "documents"
+DB = "vector_db"
 
-DOCS_DIR = "documents"
-DB_DIR = "vector_db"
-
-def optimize_ingest():
-    print("🚀 Bắt đầu quét và nạp tài liệu tối ưu...")
-    
-    # 1. Khởi tạo model nhúng của Google
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001") 
-    
-    # 2. Kết nối vào ChromaDB
-    vectordb = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
-    
-    # Lấy danh sách các file ĐÃ CÓ trong DB để không nạp lại
-    existing_docs = []
-    try:
-        db_data = vectordb.get()
-        if db_data and 'metadatas' in db_data:
-            for meta in db_data['metadatas']:
-                if meta and 'source' in meta:
-                    existing_docs.append(meta['source'])
-            existing_docs = list(set(existing_docs)) # Lọc trùng lặp
-    except Exception as e:
-        print("Chưa có DB cũ, sẽ tạo mới hoàn toàn.")
-
-    # 3. Quét thư mục documents tìm file mới
-    new_files_to_process = []
-    if os.path.exists(DOCS_DIR):
-        for filename in os.listdir(DOCS_DIR):
-            if filename.endswith(".pdf"):
-                filepath = os.path.join(DOCS_DIR, filename)
-                # Chỉ nạp nếu file này chưa từng có trong ChromaDB
-                if filepath not in existing_docs:
-                    new_files_to_process.append(filepath)
-    
-    if not new_files_to_process:
-        print("✅ Không có tài liệu mới nào. Tiết kiệm Token API!")
+def main():
+    # 1. Kiểm tra thư mục đầu vào
+    if not os.path.exists(DOCS):
+        print(f" ❌  Thư mục {DOCS} không tồn tại!")
         return
 
-    print(f"📦 Phát hiện {len(new_files_to_process)} tài liệu mới. Bắt đầu xử lý...")
+    print(" 📂  Đang quét các file trong:", DOCS)
+    all_files = os.listdir(DOCS)
+    print(" 📋  Danh sách file:", all_files)
+    raw_documents = []
     
-    # 4. Xử lý file mới (Cắt nhỏ văn bản)
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    
-    for filepath in new_files_to_process:
-        print(f"⏳ Đang nạp: {filepath}")
+    for file in all_files:
+        path = os.path.join(DOCS, file)
+        loaded_docs = []
         try:
-            loader = PyPDFLoader(filepath)
-            docs = loader.load()
-            splits = text_splitter.split_documents(docs)
-            
-            # Nạp vào DB
-            vectordb.add_documents(splits)
-            print(f"✔️ Đã nạp xong: {filepath}")
-            
-            # BÍ QUYẾT: Nghỉ 3 giây giữa mỗi file để không bị Google báo lỗi 429
-            time.sleep(3)
-        except Exception as e:
-            print(f"❌ Lỗi khi nạp {filepath}: {e}")
+            # HỖ TRỢ ĐỌC CẢ PDF VÀ TXT (FAQ)
+            if file.endswith(".pdf"):
+                loader = PyPDFLoader(path)
+                loaded_docs = loader.load()
+            elif file.endswith(".txt"):
+                loader = TextLoader(path, encoding="utf-8")
+                loaded_docs = loader.load()
+            else:
+                continue # Bỏ qua các file không phải pdf hoặc txt
 
-    print("🎉 Hoàn tất cập nhật Vector Database!")
+            # --- QUAN TRỌNG: Làm sạch Metadata để Phân quyền ---
+            for doc in loaded_docs:
+                # Chỉ lấy tên file (ví dụ: 'noiquy.pdf', 'FAQ_1.txt') thay vì cả đường dẫn
+                doc.metadata["source"] = file
+
+            raw_documents.extend(loaded_docs)
+            print(f" ✅  Đã nạp: {file}")
+        except Exception as e:
+            print(f" ❌  Lỗi khi đọc file {file}: {e}")
+            
+    if not raw_documents:
+        print(" ❌  Không tìm thấy nội dung hợp lệ nào để nạp!")
+        return
+        
+    # 2. Chia nhỏ tài liệu (Chunking)
+    print(" ✂️  Đang chia nhỏ tài liệu...")
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=600, # Chuẩn vàng để tiết kiệm Token
+        chunk_overlap=100
+    )
+    docs = splitter.split_documents(raw_documents)
+    print(f" 📦  Tổng số đoạn (chunks) tạo ra: {len(docs)}")
+    
+    # 3. Xóa Vector DB cũ để làm mới hoàn toàn
+    if os.path.exists(DB):
+        print(" 🗑 ️ Đang xóa Vector DB cũ để cập nhật dữ liệu mới...")
+        shutil.rmtree(DB)
+        
+    # 4. Khởi tạo Embedding (DÙNG GOOGLE API)
+    print("🧠 Đang hởi tạo mô hình Embedding Google (Siêu nhẹ)...")
+    api_key = os.environ.get("GEMINI_API_KEY_1") or os.environ.get("GEMINI_API_KEY")
+    embedding = GoogleGenerativeAIEmbeddings(
+        model="models/gemini-embedding-001", 
+        google_api_key=api_key
+    )
+    
+    # 5. Lưu vào ChromaDB
+    print(" 💾  Đang lưu dữ liệu vào ChromaDB...")
+    db = Chroma.from_documents(
+        documents=docs,
+        embedding=embedding,
+        persist_directory=DB
+    )
+
+    print(" ✨  CHÚC MỪNG SẾP! Hệ thống đã nạp xong tri thức mới.")
+    print(f" 🚀  Vector DB hiện đã sẵn sàng tại thư mục: {DB}")
 
 if __name__ == "__main__":
-    optimize_ingest()
+    main()
