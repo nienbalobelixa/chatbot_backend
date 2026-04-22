@@ -110,51 +110,51 @@ init_db()
 # =====================================================================
 
 # =====================================================================
-# 🚀 HỆ THỐNG QUẢN LÝ API AI (FALLBACK 3 LỚP ĐÚNG CHUẨN)
+# 🚀 HỆ THỐNG QUẢN LÝ BĂNG ĐẠN API VÀ FALLBACK THÔNG MINH
 # =====================================================================
 
-VALID_KEYS = [(name, key) for name, key in {
+raw_keys_dict = {
     "Key Mặc định": os.getenv("GEMINI_API_KEY"),
     "Key 1": os.getenv("GEMINI_API_KEY_1"),
     "Key 2": os.getenv("GEMINI_API_KEY_2"),
     "Key 3": os.getenv("GEMINI_API_KEY_3"),
     "Key 4": os.getenv("GEMINI_API_KEY_4"),
     "Key 5": os.getenv("GEMINI_API_KEY_5")
-}.items() if key]
+}
 
+VALID_KEYS = [(name, key) for name, key in raw_keys_dict.items() if key]
 print(f" 🚀  Băng đạn đã nạp: {len(VALID_KEYS)} API Keys")
+
 current_key_idx = 0
 
 def get_optimized_models():
     """
-    Đội hình ra sân mới nhất với thế hệ Gemini 3:
-    - Đánh chính: gemini-3-flash-preview (Hỗ trợ 20 câu)
-    - Đánh phụ: gemini-3.1-flash-lite-preview (Gánh team với 500 câu)
-    - Chốt chặn: gemma-3-27b-it (Bất tử 14.400 câu)
+    Cập nhật danh sách "Đội hình ra sân" khớp 100% với tài khoản của sếp:
+    - Tiên phong: gemini-3-flash-preview (Dùng 20 lượt VIP đầu tiên).
+    - Đánh chính : gemini-3.1-flash-lite-preview (dùng 15 lượt VIP đầu tiên).
+    - Chủ lực gánh team: gemma-3-27b-it (Thông minh nhất dòng Gemma, bao trọn 14.400 lượt).
+    - Dự phòng: gemma-3-12b-it (Đề phòng con 27B bị lỗi mạng).
     """
     return [
-         "gemini-3-flash-preview",
-        "gemini-3.1-flash-lite-preview", 
-        "gemma-3-27b-it"                 
+        "gemini-3-flash-preview", 
+        "gemini-3.1-flash-lite-preview",
+        "gemma-3-27b-it",    # Bản 27 Tỷ tham số chuyên dùng để Chat (it = instruction tuned)
+        "gemma-3-12b-it"     
     ]
 
 def generate_content_with_fallback(prompt) -> str:
     global current_key_idx
-    if not VALID_KEYS: 
-        print("  🚨  LỖI: Không tìm thấy API Key nào trong file .env!")
+    if not VALID_KEYS:
         return "Lỗi Server: Không tìm thấy API Key nào trong file .env!"
-    
+
     models = get_optimized_models()
-    
-    # VÒNG LẶP 1: DUYỆT QUA TỪNG API KEY
+
+    # Vòng lặp 1: Quét qua từng API Key trong băng đạn
     for attempt in range(len(VALID_KEYS)):
         key_name, current_key = VALID_KEYS[current_key_idx]
         genai.configure(api_key=current_key)
-        
-        # Mẹo hay của sếp: Lưu lại vị trí Key tiếp theo cho lượt hỏi sau (Load Balancing)
-        current_key_idx = (current_key_idx + 1) % len(VALID_KEYS)
-        
-        # VÒNG LẶP 2: DUYỆT QUA TỪNG MÔ HÌNH TRÊN CÙNG 1 KEY
+
+        # Vòng lặp 2: Quét qua từng mô hình AI
         for model_name in models:
             print(f"  🔄  Đang xử lý... | Dùng: [{key_name}] | Mô hình: [{model_name}]")
             try:
@@ -162,22 +162,29 @@ def generate_content_with_fallback(prompt) -> str:
                 response = model.generate_content(prompt)
                 print(f"  ✅  THÀNH CÔNG   | Đã trả lời bằng [{key_name}] - [{model_name}]")
                 return response.text
-                
+
             except ResourceExhausted:
-                # SỬA LỖI TẠI ĐÂY: Dùng 'continue' để thử mô hình tiếp theo trên CÙNG 1 KEY
-                print(f"  ⚠️  HẾT TOKEN    | [{key_name}] hết đạn với [{model_name}]! Thử mô hình dự phòng...")
-                continue 
-                
-            except Exception as e:
-                # Lỗi mạng hoặc lỗi hệ thống Google, vẫn thử mô hình tiếp theo
-                print(f"  ❌  LỖI KHÁC     | [{key_name}] - [{model_name}] gặp sự cố: {str(e)[:50]}...")
+                # Nếu model này hết Token, KHÔNG break vội!
+                # Có thể gemini-2.5-flash hết 20 lượt, nhưng gemini-1.5-flash vẫn còn 1500 lượt.
+                print(f"  ⚠️  HẾT HẠN MỨC  | [{model_name}] kiệt sức. Chuyển model khác...")
                 continue
+
+            except Exception as e:
+                error_msg = str(e).lower()
+                print(f"  ❌  LỖI KHÁC     | [{key_name}] - [{model_name}]: {error_msg[:50]}...")
                 
-        # Nếu vòng lặp models chạy xong mà vẫn không return được (nghĩa là cả 3 model đều xịt)
-        print(f"  🔁  CHUYỂN KEY   | [{key_name}] đã phế hoàn toàn. Chuyển sang Key tiếp theo!")
-        
+                # PHANH KHẨN CẤP: Chống Spam API của Google nếu nội dung vi phạm
+                if "400" in error_msg or "safety" in error_msg:
+                    return "Câu hỏi vi phạm chính sách an toàn hoặc quá phức tạp. Vui lòng thử lại!"
+                
+                continue # Lỗi mạng bình thường thì thử tiếp
+
+        # Nếu chạy hết tất cả các model mà vẫn không có kết quả -> Key này đã cạn kiệt hoàn toàn
+        print(f"  🚨  CHUYỂN KEY   | [{key_name}] đã hết sạch Token. Nạp súng mới!")
+        current_key_idx = (current_key_idx + 1) % len(VALID_KEYS)
+
     print("  🚨  BÁO ĐỘNG ĐỎ  | Toàn bộ hệ thống API Key đã cạn kiệt!")
-    return "Hệ thống AI hiện đang quá tải do hết sạch Token trên tất cả các Key dự phòng. Vui lòng đợi 1 phút rồi thử lại."
+    return "Hệ thống AI hiện đang quá tải do hết sạch Token trên tất cả các Key. Vui lòng đợi hoặc nạp thêm Key."
 # =====================================================================
 # 📡 ENDPOINTS
 # =====================================================================
