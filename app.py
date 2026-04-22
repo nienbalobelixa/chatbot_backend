@@ -94,9 +94,10 @@ def init_db():
         id SERIAL PRIMARY KEY, username TEXT, task TEXT, remind_at TIMESTAMP, 
         is_done BOOLEAN DEFAULT false, is_notified BOOLEAN DEFAULT false)''')
 
-    admin_hashed = hashlib.sha256("01649460309nien".encode()).hexdigest()
+    # Tự động cấy Admin mới (Username: admin1 | Pass: 123456)
+    admin_hashed = hashlib.sha256("123456".encode()).hexdigest()
     c.execute("INSERT INTO users (username, password, role) VALUES (%s, %s, %s) ON CONFLICT (username) DO NOTHING", 
-              ("admin_nien", admin_hashed, "admin"))
+              ("admin1", admin_hashed, "admin"))
 
     conn.commit()
     c.close()
@@ -117,31 +118,45 @@ VALID_KEYS = [(name, key) for name, key in {
     "Key 5": os.getenv("GEMINI_API_KEY_5")
 }.items() if key]
 
+print(f" 🚀  Băng đạn đã nạp: {len(VALID_KEYS)} API Keys")
 current_key_idx = 0
-CACHED_MODELS = []
 
 def get_optimized_models():
-    return ["gemini-3.1-flash-lite-preview", "gemini-1.5-flash", "gemma-3-27b-it"]
+    return ["gemini-3-flash-preview","gemini-3.1-flash-lite-preview", "gemma-3-27b-it"]
 
 def generate_content_with_fallback(prompt) -> str:
     global current_key_idx
-    if not VALID_KEYS: return "Lỗi Server: Không tìm thấy API Key nào trong file .env!"
+    if not VALID_KEYS: 
+        print("  🚨  LỖI: Không tìm thấy API Key nào trong file .env!")
+        return "Lỗi Server: Không tìm thấy API Key nào trong file .env!"
     
     models = get_optimized_models()
     for attempt in range(len(VALID_KEYS)):
         key_name, current_key = VALID_KEYS[current_key_idx]
         genai.configure(api_key=current_key)
+        
+        # Xoay vòng kim chỉ nam sang Key tiếp theo cho lần hỏi sau
         current_key_idx = (current_key_idx + 1) % len(VALID_KEYS)
         
         for model_name in models:
+            print(f"  🔄  Đang xử lý... | Dùng: [{key_name}] | Mô hình: [{model_name}]")
             try:
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(prompt)
+                print(f"  ✅  THÀNH CÔNG   | Đã trả lời bằng [{key_name}] - [{model_name}]")
                 return response.text
+                
             except ResourceExhausted:
+                # Bẻ gãy vòng lặp model để chuyển sang Key tiếp theo ngay lập tức
+                print(f"  ⚠️  HẾT TOKEN    | [{key_name}] đã kiệt sức với {model_name}! Đang đổi súng...")
+                break 
+                
+            except Exception as e:
+                # Nếu là lỗi khác (như mạng lag), vẫn cố thử model tiếp theo trên CÙNG Key này
+                print(f"  ❌  LỖI KHÁC     | [{key_name}] - [{model_name}] gặp sự cố: {str(e)[:50]}...")
                 continue
-            except Exception:
-                continue
+                
+    print("  🚨  BÁO ĐỘNG ĐỎ  | Toàn bộ hệ thống API Key đã cạn kiệt!")
     return "Hệ thống AI hiện đang quá tải do hết sạch Token trên tất cả các Key dự phòng. Vui lòng đợi 1 phút rồi thử lại."
 
 # =====================================================================
