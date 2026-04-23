@@ -40,7 +40,8 @@ def get_allowed_files(user_role):
         if user_role == 'admin':
             c.execute("SELECT file_name FROM document_permissions")
         else:
-            c.execute("SELECT file_name FROM document_permissions WHERE required_role = 'staff'")
+            # 🔥 ĐÃ SỬA: Ép về chữ thường hết để so sánh, không lo bị gõ lệch chữ HOA
+            c.execute("SELECT file_name FROM document_permissions WHERE LOWER(required_role) = LOWER(%s)", (user_role,))
             
         # Làm sạch tên file (xóa khoảng trắng thừa) để đảm bảo khớp 100% với ChromaDB
         files = [row[0].strip() for row in c.fetchall() if row[0]]
@@ -51,7 +52,6 @@ def get_allowed_files(user_role):
     except Exception as e:
         print(f"  ❌  [Lỗi Supabase] Không thể lấy danh sách file: {e}")
         return []
-
 def search_docs(query, user_role='staff'):
     """Tìm kiếm tài liệu có lọc theo quyền truy cập (RBAC)"""
     print(f"\n  🔍  [Câu hỏi mới] '{query}' | Từ Role: '{user_role}'")
