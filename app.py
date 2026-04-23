@@ -280,7 +280,8 @@ def ask_ai(data: Question, username: str = "guest"):
             
             if user_role == 'admin':
                 prompt = f"""Bạn là Trợ lý Hành chính & Nhân sự (HR Copilot) cấp cao của ABC TECH.
-Nhiệm vụ: LÊN DÀN Ý, SOẠN THẢO VĂN BẢN, VIẾT EMAIL, THÔNG BÁO. Hành văn lịch sự.
+Nhiệm vụ: LÊN DÀN Ý, SOẠN THẢO VĂN BẢN, VIẾT EMAIL, THÔNG BÁO. 
+QUY TẮC: Khi soạn thông báo hoặc văn bản, hãy VIẾT THẲNG vào nội dung chính, TUYỆT ĐỐI KHÔNG chào hỏi thưa gửi Giám đốc (Ví dụ: Cấm dùng "Chào Giám đốc", "Tôi đã soạn xong...").
 [TÀI LIỆU NỘI BỘ]: {context}
 [QUY TẮC NHẮC VIỆC]:
 Nếu Giám đốc yêu cầu nhắc nhở, thêm chính xác: [[REMINDER: {{"task": "nội dung ngắn gọn", "time": "YYYY-MM-DD HH:MM:SS"}}]]
