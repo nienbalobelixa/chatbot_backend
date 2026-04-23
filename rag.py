@@ -3,34 +3,32 @@ import psycopg2
 from langchain_chroma import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-# ---------------------------------------------------------
-# TỐI ƯU HIỆU SUẤT: Singleton Pattern & Lazy Loading
-# ---------------------------------------------------------
-_db_instance = None
-_embedding_instance = None
-
 def get_db_connection():
-    """Hàm kết nối Supabase (PostgreSQL) lấy URL từ biến môi trường"""
     db_url = os.environ.get("DATABASE_URL")
-    return psycopg2.connect(db_url)
-
+    # Thêm các tham số keepalives để chống rớt mạng SSL đột ngột
+    return psycopg2.connect(
+        db_url,
+        keepalives=1,
+        keepalives_idle=30,      # Ping sau mỗi 30s không hoạt động
+        keepalives_interval=10,  # Nếu không thấy phản hồi, ping lại sau 10s
+        keepalives_count=5       # Thử tối đa 5 lần trước khi báo lỗi thực sự
+    )
 def get_vector_db():
-    """Chỉ khởi tạo mô hình 1 lần duy nhất, các lần sau dùng lại luôn"""
-    global _db_instance, _embedding_instance
-    
-    if _db_instance is None:
-        print("🧠 Đang kết nối mô hình Embedding siêu nhẹ của Google...")
+    """Luôn đọc trực tiếp từ ổ cứng, KHÔNG lưu RAM. 
+       Đảm bảo AI luôn thấy file mới nhất ngay sau khi Admin upload!"""
+    try:
         api_key = os.environ.get("GEMINI_API_KEY_1") or os.environ.get("GEMINI_API_KEY")
-        _embedding_instance = GoogleGenerativeAIEmbeddings(
+        embedding = GoogleGenerativeAIEmbeddings(
             model="models/gemini-embedding-001", 
             google_api_key=api_key
         )
-        print("  ✅  Kết nối Vector DB thành công!")
-        _db_instance = Chroma(persist_directory="vector_db", embedding_function=_embedding_instance)
-        
-    return _db_instance
+        # Bắt buộc khởi tạo lại Chroma để nhận thư mục vector_db mới nhất
+        db = Chroma(persist_directory="vector_db", embedding_function=embedding)
+        return db
+    except Exception as e:
+        print(f"❌ Lỗi khởi tạo ChromaDB: {e}")
+        return None
 
-# ---------------------------------------------------------
 def get_allowed_files(user_role):
     """Lấy danh sách các file mà Role này được phép xem từ Supabase"""
     try:
@@ -40,7 +38,7 @@ def get_allowed_files(user_role):
         if user_role == 'admin':
             c.execute("SELECT file_name FROM document_permissions")
         else:
-            # 🔥 ĐÃ SỬA: Ép về chữ thường hết để so sánh, không lo bị gõ lệch chữ HOA
+            # Ép về chữ thường hết để so sánh, không lo bị gõ lệch chữ HOA/thường
             c.execute("SELECT file_name FROM document_permissions WHERE LOWER(required_role) = LOWER(%s)", (user_role,))
             
         # Làm sạch tên file (xóa khoảng trắng thừa) để đảm bảo khớp 100% với ChromaDB
@@ -52,6 +50,7 @@ def get_allowed_files(user_role):
     except Exception as e:
         print(f"  ❌  [Lỗi Supabase] Không thể lấy danh sách file: {e}")
         return []
+
 def search_docs(query, user_role='staff'):
     """Tìm kiếm tài liệu có lọc theo quyền truy cập (RBAC)"""
     print(f"\n  🔍  [Câu hỏi mới] '{query}' | Từ Role: '{user_role}'")
@@ -71,8 +70,11 @@ def search_docs(query, user_role='staff'):
     print(f"  ⚙️  [Bộ lọc Chroma] Đang quét trên {len(allowed_files)} tài liệu...")
     
     try:
-        # Bước 3: Tìm kiếm (Sử dụng hàm get_vector_db để gọi DB từ RAM)
+        # Bước 3: Tìm kiếm (Gọi DB trực tiếp từ ổ cứng)
         db = get_vector_db()
+        if db is None:
+             return {"answer": "Lỗi kết nối Vector DB cục bộ.", "sources": []}
+             
         docs = db.similarity_search(query, k=2, filter=search_filter)
         print(f"  📄  [Kết quả] Lấy ra được {len(docs)} đoạn văn bản khớp nhất.")
         
@@ -114,6 +116,9 @@ def check_exact_faq_match(query, user_role='staff'):
     
     try:
         db = get_vector_db()
+        if db is None:
+            return None
+            
         results = db.similarity_search_with_score(query, k=1, filter=search_filter)
         
         if results:
@@ -126,7 +131,6 @@ def check_exact_faq_match(query, user_role='staff'):
                 if "Câu trả lời:" in content:
                     answer = content.split("Câu trả lời:")[1].strip()
                     print("  ✅  BẮT ĐƯỢC FAQ! ĐÃ CHẶN ĐỨNG LUỒNG GỌI GEMINI!")
-                    # Trả về chuỗi câu trả lời (Vì app.py đang mong đợi một string)
                     return answer
     except Exception as e:
         print(f"  ❌  [Lỗi Semantic Cache]: {e}")

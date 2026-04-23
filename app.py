@@ -26,7 +26,9 @@ from dotenv import load_dotenv
 import PyPDF2
 import io
 import PIL.Image
-from fastapi import BackgroundTasks 
+from fastapi import BackgroundTasks
+
+from supabase import create_client, Client
 
 app = FastAPI()
 load_dotenv()
@@ -34,6 +36,13 @@ load_dotenv()
 os.makedirs("documents", exist_ok=True)
 os.makedirs("avatars", exist_ok=True)
 os.makedirs("vector_db", exist_ok=True)
+
+@app.on_event("startup")
+async def startup_event():
+    import subprocess
+    print("🚀 KHỞI ĐỘNG SERVER: Đang khôi phục não bộ AI từ Supabase...")
+    # Chạy ngầm ingest để lấy file từ Supabase và xây lại ChromaDB
+    subprocess.Popen(["python", "ingest.py"])
 
 class EndpointFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
@@ -52,14 +61,29 @@ AVATARS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "avatars"
 app.mount("/avatars", StaticFiles(directory=AVATARS_DIR), name="avatars")
 app.mount("/files", StaticFiles(directory=DOCS_DIR), name="files")
 
+
 # =====================================================================
 # 🛠️ KẾT NỐI DATABASE SUPABASE (POSTGRESQL)
 # =====================================================================
 
+# --- THÊM ĐOẠN NÀY VÀO ---
+
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# ------------------------
+
 def get_db_connection():
     db_url = os.environ.get("DATABASE_URL")
-    return psycopg2.connect(db_url)
-
+    # Thêm các tham số keepalives để chống rớt mạng SSL đột ngột
+    return psycopg2.connect(
+        db_url,
+        keepalives=1,
+        keepalives_idle=30,      # Ping sau mỗi 30s không hoạt động
+        keepalives_interval=10,  # Nếu không thấy phản hồi, ping lại sau 10s
+        keepalives_count=5       # Thử tối đa 5 lần trước khi báo lỗi thực sự
+    )
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
@@ -599,17 +623,28 @@ def answer_unanswered_question(q_id: int, req: AnswerReq):
 @app.post("/admin/upload")
 async def upload_document(file: UploadFile = File(...), role: str = Form(...)):
     try:
-        file_path = os.path.join(DOCS_DIR, file.filename)
-        with open(file_path, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
+        file_bytes = await file.read()
+        
+        # 1. Quăng thẳng file lên Supabase Storage
+        try:
+            supabase.storage.from_("documents").upload(file.filename, file_bytes)
+        except:
+            # Nếu file đã tồn tại thì ghi đè
+            supabase.storage.from_("documents").update(file.filename, file_bytes)
+            
+        # 2. Lưu quyền vào PostgreSQL
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("INSERT INTO document_permissions (file_name, required_role) VALUES (%s, %s) ON CONFLICT (file_name) DO UPDATE SET required_role = EXCLUDED.required_role", (file.filename, role))
         conn.commit()
         c.close()
         conn.close()
+        
+        # 3. Kích hoạt băm dữ liệu
         subprocess.run(["python", "ingest.py"])
-        return {"message": f"Đã tải lên và nạp {file.filename} thành công!"}
-    except Exception as e: return {"error": str(e)}
+        return {"message": f"Đã tải lên Supabase và nạp {file.filename} thành công!"}
+    except Exception as e: 
+        return {"error": str(e)}
 
 @app.get("/admin/documents")
 def get_documents():
@@ -672,16 +707,23 @@ def update_faq(file_name: str, req: EditFaqReq):
 
 @app.delete("/admin/documents/{filename}")
 def delete_document(filename: str, background_tasks: BackgroundTasks):
+    # 1. Xóa trong PostgreSQL
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("DELETE FROM document_permissions WHERE file_name = %s", (filename,))
     conn.commit()
     c.close()
     conn.close()
-    file_path = os.path.join(DOCS_DIR, filename)
-    if os.path.exists(file_path): os.remove(file_path)
+    
+    # 2. Xóa trên Supabase Storage
+    try:
+        supabase.storage.from_("documents").remove([filename])
+    except Exception as e:
+        print("Lỗi xóa file storage:", e)
+        
+    # 3. Cập nhật lại ChromaDB
     background_tasks.add_task(subprocess.run, ["python", "ingest.py"])
-    return {"message": f"Đã xóa file {filename}. Đang cập nhật DB ngầm."}
+    return {"message": f"Đã xóa file {filename} khỏi Supabase."}
 
 @app.post("/admin/set-permission")
 def set_document_permission(file_name: str, role: str):
