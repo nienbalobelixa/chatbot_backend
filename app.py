@@ -350,12 +350,15 @@ Nếu Giám đốc yêu cầu nhắc nhở, thêm chính xác: [[REMINDER: {{"ta
         if is_new_session:
             title = data.question[:30] + "..."
             c.execute("INSERT INTO chat_sessions (id, username, title, last_active) VALUES (%s, %s, %s, %s)", (s_id, username, title, current_time))
-            c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (%s, %s, %s, %s, %s)", (s_id, username, "user", data.question, "[]"))
             
+        # 🔥 ĐÃ SỬA: Đưa dòng lưu câu hỏi của User thoát ra khỏi lệnh if (Nằm ngang hàng với if)
+        c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (%s, %s, %s, %s, %s)", (s_id, username, "user", data.question, "[]"))
+
+        # Lưu câu trả lời của Bot (Giữ nguyên)
         c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (%s, %s, %s, %s, %s)", (s_id, username, "bot", ai_answer, str(sources)))
         c.execute("UPDATE chat_sessions SET last_active = %s WHERE id = %s", (current_time, s_id))
-
         conn.commit()
+        
         c.close()
         conn.close()
         return { "answer": ai_answer, "sources": sources, "follow_ups": follow_ups, "session_id": s_id, "time": current_time.strftime("%H:%M - %d/%m/%Y") }
