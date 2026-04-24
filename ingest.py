@@ -85,12 +85,31 @@ def main():
     if os.path.exists(DB):
         shutil.rmtree(DB)
         
+    # ... (Các đoạn đọc file và băm nhỏ ở trên giữ nguyên) ...
+
+    # 3. LÀM MỚI VECTOR DB CHUẨN ENTERPRISE (CHỐNG XUNG ĐỘT)
     print("🧠 Đang khởi tạo mô hình Embedding...")
     api_key = os.environ.get("GEMINI_API_KEY_1") or os.environ.get("GEMINI_API_KEY")
     embedding = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=api_key)
+
+    # KHÔNG dùng shutil.rmtree nữa. Chúng ta kết nối vào DB và xóa sạch dữ liệu bên trong.
+    print("  🗑️  Đang dọn dẹp bộ nhớ cũ một cách an toàn...")
+    if os.path.exists(DB):
+        try:
+            db_old = Chroma(persist_directory=DB, embedding_function=embedding)
+            db_old.delete_collection() # Lệnh này chỉ xóa dữ liệu, giữ nguyên file vật lý nên không bao giờ bị lỗi khóa ổ cứng
+            print("  ✅  Đã dọn dẹp xong dữ liệu cũ!")
+        except Exception as e:
+            print(f"  ⚠️  Collection trống hoặc chưa tạo: {e}")
+
+    # 4. Lưu dữ liệu mới
+    print("  💾  Đang nạp kiến thức mới vào ChromaDB...")
+    Chroma.from_documents(
+        documents=docs,
+        embedding=embedding,
+        persist_directory=DB
+    )
     
-    print("  💾  Đang lưu dữ liệu vào ChromaDB...")
-    Chroma.from_documents(documents=docs, embedding=embedding, persist_directory=DB)
     print("  ✨  CHÚC MỪNG SẾP! Hệ thống đã nạp xong tri thức mới.")
 
 if __name__ == "__main__":

@@ -358,7 +358,7 @@ Nếu Giám đốc yêu cầu nhắc nhở, thêm chính xác: [[REMINDER: {{"ta
         c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (%s, %s, %s, %s, %s)", (s_id, username, "bot", ai_answer, str(sources)))
         c.execute("UPDATE chat_sessions SET last_active = %s WHERE id = %s", (current_time, s_id))
         conn.commit()
-        
+
         c.close()
         conn.close()
         return { "answer": ai_answer, "sources": sources, "follow_ups": follow_ups, "session_id": s_id, "time": current_time.strftime("%H:%M - %d/%m/%Y") }
@@ -827,19 +827,34 @@ def delete_unanswered(q_id: int):
 @app.post("/users/{username}/avatar")
 async def upload_avatar(username: str, file: UploadFile = File(...)):
     try:
+        import time
         ext = file.filename.split('.')[-1]
-        new_filename = f"avatar_{username}.{ext}"
-        filepath = os.path.join(AVATARS_DIR, new_filename)
-        with open(filepath, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
         
+        # Thêm timestamp vào tên file để tránh trình duyệt lưu Cache ảnh cũ
+        new_filename = f"avatar_{username}_{int(time.time())}.{ext}" 
+        file_bytes = await file.read()
+
+        # 1. Đẩy ảnh thẳng lên Supabase Storage (nhà kho 'avatars')
+        try:
+            supabase.storage.from_("avatars").upload(new_filename, file_bytes, {"content-type": file.content_type})
+        except:
+            # Nếu trùng file thì chép đè
+            supabase.storage.from_("avatars").update(new_filename, file_bytes, {"content-type": file.content_type})
+
+        # 2. Lấy đường link URL công khai của bức ảnh
+        public_url = supabase.storage.from_("avatars").get_public_url(new_filename)
+
+        # 3. Lưu trực tiếp đường link URL này vào CSDL PostgreSQL
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("UPDATE users SET avatar = %s WHERE username = %s", (new_filename, username))
+        c.execute("UPDATE users SET avatar = %s WHERE username = %s", (public_url, username))
         conn.commit()
         c.close()
         conn.close()
-        return {"status": "success", "avatar_url": new_filename}
-    except Exception as e: return {"status": "error", "message": str(e)}
+        
+        return {"status": "success", "avatar_url": public_url}
+    except Exception as e: 
+        return {"status": "error", "message": str(e)}
 
 @app.get("/users/{username}/avatar")
 def get_avatar(username: str):
