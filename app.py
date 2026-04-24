@@ -830,7 +830,7 @@ async def upload_avatar(username: str, file: UploadFile = File(...)):
         import time
         ext = file.filename.split('.')[-1]
         
-        # Thêm timestamp vào tên file để tránh trình duyệt lưu Cache ảnh cũ
+        # Tạo tên file mới
         new_filename = f"avatar_{username}_{int(time.time())}.{ext}" 
         file_bytes = await file.read()
 
@@ -838,13 +838,12 @@ async def upload_avatar(username: str, file: UploadFile = File(...)):
         try:
             supabase.storage.from_("avatars").upload(new_filename, file_bytes, {"content-type": file.content_type})
         except:
-            # Nếu trùng file thì chép đè
             supabase.storage.from_("avatars").update(new_filename, file_bytes, {"content-type": file.content_type})
 
-        # 2. Lấy đường link URL công khai của bức ảnh
+        # 2. Lấy link URL công khai
         public_url = supabase.storage.from_("avatars").get_public_url(new_filename)
 
-        # 3. Lưu trực tiếp đường link URL này vào CSDL PostgreSQL
+        # 3. Lưu link URL vào Database
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("UPDATE users SET avatar = %s WHERE username = %s", (public_url, username))
