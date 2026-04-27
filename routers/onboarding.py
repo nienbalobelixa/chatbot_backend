@@ -1,9 +1,14 @@
+import os
+import psycopg2
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 
 router = APIRouter()
-
+# --- HÀM KẾT NỐI DATABASE CHUẨN ---
+def get_db_connection():
+    db_url = os.environ.get("DATABASE_URL")
+    return psycopg2.connect(db_url, keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=5)
 # --- 1. ĐỊNH NGHĨA SCHEMA ---
 class OnboardingTask(BaseModel):
     day: int
@@ -12,11 +17,6 @@ class OnboardingTask(BaseModel):
     action_required: bool = True # Yêu cầu người dùng phải bấm xác nhận
     suggested_prompt: str  # <--- Câu lệnh mồi để ép chatbot RAG trả lời
 
-class OnboardingProgress(BaseModel):
-    user_id: str
-    current_day: int
-    completed_days: List[int]
-    is_fully_completed: bool
 
 # --- 2. DỮ LIỆU MẪU (Nên chuyển vào Database thực tế) ---
 # FIX 1: Đã đưa dòng này ra sát lề trái, xóa thụt lề sai
@@ -51,42 +51,41 @@ user_progress_db = {
 
 @router.get("/api/onboarding/{user_id}")
 async def get_onboarding_status(user_id: str):
-    """Lấy nhiệm vụ hội nhập của ngày hiện tại cho nhân viên."""
-    progress = user_progress_db.get(user_id)
-    
-    # 🌟 ĐÃ SỬA: Tự động khởi tạo cho nhân viên mới thay vì báo lỗi 404
-    if not progress:
-        progress = {"current_day": 1, "completed_days": [], "is_fully_completed": False}
-        user_progress_db[user_id] = progress  # Lưu luôn vào Database giả lập
+    """Lấy trạng thái hội nhập trực tiếp từ Supabase"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        # Kiểm tra cột is_onboarded trong bảng users
+        c.execute("SELECT is_onboarded FROM users WHERE username = %s", (user_id,))
+        result = c.fetchone()
+        c.close()
+        conn.close()
         
-    if progress["is_fully_completed"]:
-        return {"status": "completed", "message": "Đã hoàn thành toàn bộ lộ trình hội nhập."}
-        
-    current_day = progress["current_day"]
-    task = ONBOARDING_SCENARIOS.get(current_day)
-    
-    return {
-        "status": "in_progress",
-        "progress": progress,
-        "current_task": task.dict() if task else None
-    }
+        # Nếu không tìm thấy user hoặc is_onboarded = True -> Đã hoàn thành
+        if not result or result[0] == True:
+            return {"status": "completed", "is_completed": True, "message": "Đã hoàn thành lộ trình hội nhập."}
+            
+        # Nếu is_onboarded = False -> Trả về kịch bản Ngày 1
+        task = ONBOARDING_SCENARIOS.get(1)
+        return {
+            "status": "in_progress",
+            "is_completed": False,
+            "current_task": task.dict() if task else None
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @router.post("/api/onboarding/{user_id}/complete")
-async def complete_onboarding_task(user_id: str, day: int):
-    """Đánh dấu hoàn thành nhiệm vụ của một ngày cụ thể."""
-    progress = user_progress_db.get(user_id)
-    if not progress:
-        raise HTTPException(status_code=404, detail="Không tìm thấy thông tin nhân viên")
-        
-    if day not in progress["completed_days"]:
-        progress["completed_days"].append(day)
-        
-    # Chuyển sang ngày tiếp theo hoặc kết thúc
-    next_day = day + 1
-    if next_day > len(ONBOARDING_SCENARIOS):
-        progress["is_fully_completed"] = True
-    else:
-        progress["current_day"] = next_day
-        
-    user_progress_db[user_id] = progress
-    return {"message": f"Đã hoàn thành nhiệm vụ ngày {day}", "new_progress": progress}
+async def complete_onboarding_task(user_id: str):
+    """Đánh dấu hoàn thành vĩnh viễn trên Supabase"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        # Lưu vào Supabase: Cập nhật is_onboarded thành TRUE
+        c.execute("UPDATE users SET is_onboarded = TRUE WHERE username = %s", (user_id,))
+        conn.commit()
+        c.close()
+        conn.close()
+        return {"status": "success", "message": "Đã lưu trạng thái hoàn thành vào Database"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

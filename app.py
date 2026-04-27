@@ -494,6 +494,39 @@ def complete_onboarding(username: str):
     conn.close()
     return {"status": "success"}
 
+# 1. API kiểm tra trạng thái Onboarding khi user đăng nhập
+@app.get("/api/onboarding/{username}")
+async def check_onboarding(username: str):
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT is_onboarded FROM users WHERE username = %s", (username,))
+        result = c.fetchone()
+        c.close()
+        conn.close()
+        
+        if result:
+            # Nếu is_onboarded là True -> đã hoàn thành hết
+            return {"is_completed": result[0]} 
+        return {"is_completed": False}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# 2. API đánh dấu đã hoàn thành khi bấm nút "Đã Nắm Rõ"
+@app.post("/api/onboarding/{username}/complete")
+async def complete_onboarding(username: str):
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        # Đổi trạng thái is_onboarded thành TRUE vĩnh viễn
+        c.execute("UPDATE users SET is_onboarded = TRUE WHERE username = %s", (username,))
+        conn.commit()
+        c.close()
+        conn.close()
+        return {"status": "success", "message": "Đã lưu trạng thái hoàn thành vào Database"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.put("/sessions/{session_id}/rename")
 def rename_session(session_id: str, req: RenameRequest):
     conn = get_db_connection()
@@ -750,13 +783,23 @@ def get_system_logs():
 
 @app.get("/admin/unanswered")
 def get_unanswered():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT id, question, username, timestamp FROM unanswered_questions ORDER BY timestamp DESC")
-    logs = [{"id": r[0], "question": r[1], "username": r[2], "time": r[3]} for r in c.fetchall()]
-    c.close()
-    conn.close()
-    return logs
+    conn = None
+    c = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT id, question, username, timestamp FROM unanswered_questions ORDER BY timestamp DESC")
+        logs = [{"id": r[0], "question": r[1], "username": r[2], "time": r[3]} for r in c.fetchall()]
+        return logs
+    except Exception as e:
+        # Nếu có lỗi mạng hoặc SQL, báo lỗi văn minh thay vì sập server
+        return {"status": "error", "message": f"Lỗi truy xuất dữ liệu: {str(e)}"}
+    finally:
+        # 🔥 Đỉnh cao là ở đây: Dù code chạy thành công hay báo lỗi, block 'finally' LUÔN LUÔN được gọi để dọn dẹp!
+        if c:
+            c.close()
+        if conn:
+            conn.close()
 
 @app.get("/admin/stats")
 def get_admin_stats():
