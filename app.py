@@ -564,16 +564,22 @@ def summarize_session(session_id: str):
         return {"summary": summary_text}
     except Exception: return {"summary": "Lỗi hệ thống."}
 
-@app.get("/notifications/{username}")
+@app.get("/api/notifications/{username}") 
 def get_notifications(username: str):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT id, session_id, message, is_read, timestamp FROM notifications WHERE username = %s AND is_trashed = false ORDER BY timestamp DESC", (username,))
-    rows = c.fetchall()
-    c.close()
-    conn.close()
-    return [{"id": r[0], "session_id": r[1], "message": r[2], "is_read": bool(r[3]), "time": r[4]} for r in rows]
-
+    conn = None
+    c = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        # Code SELECT của sếp ở đây...
+        c.execute("SELECT id, session_id, message, is_read, timestamp FROM notifications WHERE username = %s AND is_trashed = false ORDER BY timestamp DESC", (username,))
+        # ... xử lý dữ liệu ...
+        return results
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if c: c.close()
+        if conn: conn.close()
 @app.get("/notifications/{username}/trash")
 def get_trashed_notifications(username: str):
     conn = get_db_connection()
