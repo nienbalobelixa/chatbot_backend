@@ -664,14 +664,14 @@ def answer_unanswered_question(q_id: int, req: AnswerReq):
         conn.close()
 
 @app.post("/admin/upload")
-async def upload_document(file: UploadFile = File(...), role: str = Form(...)):
+async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...), role: str = Form(...)):
     try:
         file_bytes = await file.read()
         
         # 1. Quăng thẳng file lên Supabase Storage
         try:
             supabase.storage.from_("documents").upload(file.filename, file_bytes)
-        except:
+        except Exception:
             # Nếu file đã tồn tại thì ghi đè
             supabase.storage.from_("documents").update(file.filename, file_bytes)
             
@@ -683,11 +683,11 @@ async def upload_document(file: UploadFile = File(...), role: str = Form(...)):
         c.close()
         conn.close()
         
-        # 3. Kích hoạt băm dữ liệu
-        subprocess.run(["python", "ingest.py"])
-        return {"message": f"Đã tải lên Supabase và nạp {file.filename} thành công!"}
+        # 3. Tải file lên xong, trả về ngay cho UI
+        background_tasks.add_task(subprocess.run, ["python", "ingest.py"], check=False)
+        return {"status": "success", "message": f"Đã tải lên Supabase thành công! File {file.filename} sẽ được xử lý nền."}
     except Exception as e: 
-        return {"error": str(e)}
+        return {"status": "error", "error": str(e)}
 
 @app.get("/admin/documents")
 def get_documents():
