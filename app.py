@@ -104,6 +104,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS unanswered_questions (
         id SERIAL PRIMARY KEY, question TEXT, username TEXT, session_id TEXT, 
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_trashed BOOLEAN DEFAULT false)''')
+    c.execute("ALTER TABLE unanswered_questions ADD COLUMN IF NOT EXISTS is_trashed BOOLEAN DEFAULT false")
     
     c.execute('''CREATE TABLE IF NOT EXISTS feedbacks (
         id SERIAL PRIMARY KEY, session_id TEXT, username TEXT, bot_response TEXT, 
