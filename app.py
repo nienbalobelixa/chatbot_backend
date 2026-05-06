@@ -103,7 +103,7 @@ def init_db():
     
     c.execute('''CREATE TABLE IF NOT EXISTS unanswered_questions (
         id SERIAL PRIMARY KEY, question TEXT, username TEXT, session_id TEXT, 
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_trashed BOOLEAN DEFAULT false)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS feedbacks (
         id SERIAL PRIMARY KEY, session_id TEXT, username TEXT, bot_response TEXT, 
@@ -794,7 +794,7 @@ def get_unanswered():
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id, question, username, timestamp FROM unanswered_questions ORDER BY timestamp DESC")
+        c.execute("SELECT id, question, username, timestamp FROM unanswered_questions WHERE is_trashed = false ORDER BY timestamp DESC")
         logs = [{"id": r[0], "question": r[1], "username": r[2], "time": r[3]} for r in c.fetchall()]
         return logs
     except Exception as e:
@@ -806,6 +806,22 @@ def get_unanswered():
             c.close()
         if conn:
             conn.close()
+
+@app.get("/admin/unanswered/trashed")
+def get_trashed_unanswered():
+    conn = None
+    c = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT id, question, username, timestamp FROM unanswered_questions WHERE is_trashed = true ORDER BY timestamp DESC")
+        logs = [{"id": r[0], "question": r[1], "username": r[2], "time": r[3]} for r in c.fetchall()]
+        return logs
+    except Exception as e:
+        return {"status": "error", "message": f"Lỗi truy xuất dữ liệu: {str(e)}"}
+    finally:
+        if c: c.close()
+        if conn: conn.close()
 
 @app.get("/admin/stats")
 def get_admin_stats():
@@ -868,6 +884,26 @@ def delete_unanswered(q_id: int):
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("DELETE FROM unanswered_questions WHERE id = %s", (q_id,))
+    conn.commit()
+    c.close()
+    conn.close()
+    return {"status": "success"}
+
+@app.put("/admin/unanswered/{q_id}/trash")
+def trash_unanswered(q_id: int):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("UPDATE unanswered_questions SET is_trashed = true WHERE id = %s", (q_id,))
+    conn.commit()
+    c.close()
+    conn.close()
+    return {"status": "success"}
+
+@app.put("/admin/unanswered/{q_id}/restore")
+def restore_unanswered(q_id: int):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("UPDATE unanswered_questions SET is_trashed = false WHERE id = %s", (q_id,))
     conn.commit()
     c.close()
     conn.close()
