@@ -572,10 +572,9 @@ def get_notifications(username: str):
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        # Code SELECT của sếp ở đây...
         c.execute("SELECT id, session_id, message, is_read, timestamp FROM notifications WHERE username = %s AND is_trashed = false ORDER BY timestamp DESC", (username,))
-        # ... xử lý dữ liệu ...
-        return results
+        rows = c.fetchall()
+        return [{"id": r[0], "session_id": r[1], "message": r[2], "is_read": bool(r[3]), "time": r[4]} for r in rows]
     except Exception as e:
         return {"status": "error", "message": str(e)}
     finally:
