@@ -565,7 +565,7 @@ def summarize_session(session_id: str):
         return {"summary": summary_text}
     except Exception: return {"summary": "Lỗi hệ thống."}
 
-@app.get("/api/notifications/{username}") 
+@app.get("/notifications/{username}") 
 def get_notifications(username: str):
     conn = None
     c = None
