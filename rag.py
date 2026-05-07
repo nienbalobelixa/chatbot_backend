@@ -102,37 +102,55 @@ def search_docs(query, user_role='staff'):
         }
 
 def check_exact_faq_match(query, user_role='staff'):
-    """Quét FAQ và trả về Câu trả lời trực tiếp (nếu điểm tương đồng cao)"""
-    print(f"\n  ⚡  [Semantic Cache] Đang kiểm tra câu hỏi: '{query}'")
+    """🔥 Quét FAQ từ DATABASE (Supabase) và trả về Câu trả lời trực tiếp nếu khớp"""
+    from difflib import SequenceMatcher
     
-    allowed_files = get_allowed_files(user_role)
-    # Lọc ra chỉ tìm trong các file FAQ (Do Admin trả lời)
-    faq_files = [f for f in allowed_files if f.startswith("FAQ_")]
-    
-    if not faq_files:
-        return None
-        
-    search_filter = {"source": {"$in": faq_files}}
+    print(f"\n  ⚡  [FAQ Lookup] Đang kiểm tra câu hỏi trong kho: '{query}'")
     
     try:
-        db = get_vector_db()
-        if db is None:
-            return None
-            
-        results = db.similarity_search_with_score(query, k=1, filter=search_filter)
+        conn = get_db_connection()
+        c = conn.cursor()
         
-        if results:
-            doc, score = results[0]
-            print(f"  🎯  [Semantic Cache] Điểm tương đồng: {score:.3f} (Nguồn: {doc.metadata.get('source')})")
+        # Lấy tất cả FAQ từ database
+        c.execute("SELECT id, question, answer FROM faqs ORDER BY updated_at DESC")
+        faqs = c.fetchall()
+        c.close()
+        conn.close()
+        
+        if not faqs:
+            print("  📭 [Kho FAQ] Chưa có câu hỏi nào được admin trả lời")
+            return None
+        
+        # So sánh độ tương đồng với từng FAQ
+        best_match = None
+        best_score = 0
+        
+        query_lower = query.lower().strip()
+        
+        for faq_id, faq_question, faq_answer in faqs:
+            faq_q_lower = faq_question.lower().strip()
             
-            # Điểm < 0.25 là cực kỳ giống nhau
-            if score < 0.25:
-                content = doc.page_content
-                if "Câu trả lời:" in content:
-                    answer = content.split("Câu trả lời:")[1].strip()
-                    print("  ✅  BẮT ĐƯỢC FAQ! ĐÃ CHẶN ĐỨNG LUỒNG GỌI GEMINI!")
-                    return answer
+            # So sánh độ giống nhau (0.0 - 1.0)
+            similarity = SequenceMatcher(None, query_lower, faq_q_lower).ratio()
+            
+            if similarity > best_score:
+                best_score = similarity
+                best_match = (faq_id, faq_question, faq_answer, similarity)
+        
+        # Nếu độ giống nhau >= 70%, trả về câu trả lời admin
+        if best_match and best_score >= 0.70:
+            faq_id, faq_q, faq_ans, score = best_match
+            print(f"  ✅ [FAQ HIT] Khớp với FAQ #{faq_id} - Độ tương đồng: {score:.1%}")
+            print(f"     📝 Câu gốc: {faq_q}")
+            print(f"     👉 Trả lời từ Kho: {faq_ans[:100]}...")
+            return faq_ans
+        else:
+            if best_match:
+                print(f"  ⚠️  [Gần như] Câu hỏi gần giống (~{best_score:.1%}) nhưng chưa đủ tin cậy, gọi AI")
+            else:
+                print(f"  📭 [Không tìm] Không có FAQ tương tự, sẽ hỏi AI")
+            
     except Exception as e:
-        print(f"  ❌  [Lỗi Semantic Cache]: {e}")
+        print(f"  ❌  [Lỗi FAQ Lookup]: {e}")
         
     return None
