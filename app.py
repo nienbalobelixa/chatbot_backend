@@ -118,6 +118,10 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS reminders (
         id SERIAL PRIMARY KEY, username TEXT, task TEXT, remind_at TIMESTAMP, 
         is_done BOOLEAN DEFAULT false, is_notified BOOLEAN DEFAULT false)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS faqs (
+        id SERIAL PRIMARY KEY, question TEXT, answer TEXT, unanswered_id INTEGER, 
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
     # Tự động cấy Admin mới (Username: admin1 | Pass: 123456)
     admin_hashed = hashlib.sha256("123456".encode()).hexdigest()
@@ -641,10 +645,15 @@ def answer_unanswered_question(q_id: int, req: AnswerReq):
 
         session_id, question, username = row
         current_time = datetime.now()
+        
+        # 🔥 LƯU FAQ VÀO DATABASE THAY VÌ FILE
+        c.execute("INSERT INTO faqs (question, answer, unanswered_id, created_at, updated_at) VALUES (%s, %s, %s, %s, %s)", 
+                  (question, req.answer, q_id, current_time, current_time))
+        
+        # Cũng lưu file để backup
         filename = f"FAQ_{q_id}_{current_time.strftime('%Y%m%d%H%M%S')}.txt"
         filepath = os.path.join(DOCS_DIR, filename)
         with open(filepath, "w", encoding="utf-8") as f: f.write(f"Câu hỏi: {question}\nCâu trả lời: {req.answer}\n")
-
         c.execute("INSERT INTO document_permissions (file_name, required_role) VALUES (%s, 'staff') ON CONFLICT (file_name) DO UPDATE SET required_role = 'staff'", (filename,))
 
         if session_id:
@@ -702,50 +711,62 @@ def get_documents():
 def get_faqs():
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT file_name FROM document_permissions WHERE file_name LIKE 'FAQ_%'")
-    db_faqs = c.fetchall()
+    # 🔥 ĐỌC FAQ TỪ DATABASE THAY VÌ FILE SYSTEM
+    c.execute("SELECT id, question, answer FROM faqs ORDER BY created_at DESC")
+    rows = c.fetchall()
     c.close()
     conn.close()
-    faqs = []
-    for r in db_faqs:
-        file_name = r[0]
-        filepath = os.path.join(DOCS_DIR, file_name)
-        question, answer = "", ""
-        if os.path.exists(filepath):
-            with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
-                if "Câu hỏi: " in content and "Câu trả lời: " in content:
-                    parts = content.split("\nCâu trả lời: ")
-                    if len(parts) >= 2:
-                        question = parts[0].replace("Câu hỏi: ", "").strip()
-                        answer = parts[1].strip()
-                else: question, answer = file_name, content
-        faqs.append({"id": file_name, "file_name": file_name, "question": question, "answer": answer})
+    faqs = [{"id": r[0], "file_name": f"FAQ_{r[0]}", "question": r[1], "answer": r[2]} for r in rows]
     return faqs
 
-@app.put("/admin/faqs/{file_name}")
-def update_faq(file_name: str, req: EditFaqReq):
+@app.put("/admin/faqs/{faq_id}")
+def update_faq(faq_id: int, req: EditFaqReq):
     try:
-        filepath = os.path.join(DOCS_DIR, file_name)
-        if not os.path.exists(filepath): return {"status": "error", "message": "File không tồn tại"}
-        old_question = ""
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read()
-            if "Câu hỏi: " in content and "Câu trả lời: " in content:
-                old_question = content.split("Câu trả lời: ")[0].replace("Câu hỏi: ", "").strip()
-        with open(filepath, "w", encoding="utf-8") as f: f.write(f"Câu hỏi: {req.question}\nCâu trả lời: {req.answer}\n")
-        if old_question:
-            conn = get_db_connection()
-            c = conn.cursor()
-            new_chat_content = f" 🔔  **[Cập nhật từ Quản trị viên]**\n\n* 📝  Câu hỏi: {req.question}*\n\n** 👉  Trả lời:** {req.answer}"
-            c.execute("UPDATE chat_history SET content = %s WHERE role = 'bot' AND content LIKE %s", (new_chat_content, f"%{old_question[:20]}%"))
-            short_msg = f"Admin đã CẬP NHẬT: '{req.question[:25]}...'"
-            c.execute("UPDATE notifications SET message = %s, is_read = false, timestamp = CURRENT_TIMESTAMP WHERE message LIKE %s", (short_msg, f"%{old_question[:20]}%"))
-            conn.commit()
-            c.close()
-            conn.close()
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # 🔥 LẤY FAQ CỦA TỪDATABASE, CẬP NHẬT CẢ DATABASE VÀ NOTIFICATIONS
+        c.execute("SELECT question FROM faqs WHERE id = %s", (faq_id,))
+        row = c.fetchone()
+        if not row: 
+            return {"status": "error", "message": "FAQ không tồn tại"}
+        
+        old_question = row[0]
+        current_time = datetime.now()
+        
+        # Cập nhật FAQ trong database
+        c.execute("UPDATE faqs SET question = %s, answer = %s, updated_at = %s WHERE id = %s", 
+                  (req.question, req.answer, current_time, faq_id))
+        
+        # Cập nhật chat history
+        new_chat_content = f" 🔔  **[Cập nhật từ Quản trị viên]**\n\n* 📝  Câu hỏi: {req.question}*\n\n** 👉  Trả lời:** {req.answer}"
+        c.execute("UPDATE chat_history SET content = %s WHERE role = 'bot' AND content LIKE %s", 
+                  (new_chat_content, f"%{old_question[:20]}%"))
+        
+        # Cập nhật notifications
+        short_msg = f"Admin đã CẬP NHẬT: '{req.question[:25]}...'"
+        c.execute("UPDATE notifications SET message = %s, is_read = false, timestamp = %s WHERE message LIKE %s", 
+                  (short_msg, current_time, f"%{old_question[:20]}%"))
+        
+        conn.commit()
+        c.close()
+        conn.close()
         return {"status": "success"}
     except Exception as e: return {"status": "error", "message": str(e)}
+
+@app.delete("/admin/faqs/{faq_id}")
+def delete_faq(faq_id: int):
+    """Xóa FAQ khỏi kho"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM faqs WHERE id = %s", (faq_id,))
+        conn.commit()
+        c.close()
+        conn.close()
+        return {"status": "success", "message": "Đã xóa FAQ"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.delete("/admin/documents/{filename}")
 def delete_document(filename: str, background_tasks: BackgroundTasks):
