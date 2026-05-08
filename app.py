@@ -167,6 +167,8 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS faqs (
             id SERIAL PRIMARY KEY, question TEXT, answer TEXT, unanswered_id INTEGER, 
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+        c.execute("ALTER TABLE faqs ADD COLUMN IF NOT EXISTS is_trashed BOOLEAN DEFAULT false")
 
         # Tự động cấy Admin mới (Username: admin1 | Pass: 123456)
         admin_hashed = hashlib.sha256("123456".encode()).hexdigest()
@@ -377,7 +379,7 @@ def ask_ai(data: Question, username: str = "guest"):
             rag_res = search_docs(optimized_query, user_role=user_role)
             context = rag_res.get("answer", "")
             raw_sources = rag_res.get("sources", [])
-            sources = [f"Tài liệu: {s}" for s in raw_sources]
+            sources = raw_sources # Giữ nguyên tên file sạch, ví dụ: ["Bao_Mat_Thong_Tin_2026.pdf"]
             
             if user_role == 'admin':
                 prompt = f"""Bạn là Trợ lý Hành chính & Nhân sự (HR Copilot) cấp cao của ABC TECH.
@@ -816,6 +818,7 @@ def answer_unanswered_question(q_id: int, req: AnswerReq):
         c.execute("INSERT INTO faqs (question, answer, unanswered_id, created_at, updated_at) VALUES (%s, %s, %s, %s, %s)", 
                   (question, req.answer, q_id, current_time, current_time))
         
+        
         # Cũng lưu file để backup
         filename = f"FAQ_{q_id}_{current_time.strftime('%Y%m%d%H%M%S')}.txt"
         filepath = os.path.join(DOCS_DIR, filename)
@@ -904,17 +907,77 @@ def get_faqs():
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        # 🔥 ĐỌC FAQ TỪ DATABASE THAY VÌ FILE SYSTEM
-        c.execute("SELECT id, question, answer FROM faqs ORDER BY created_at DESC")
-        rows = c.fetchall()
+        # 💡 CHỈ LẤY NHỮNG CÂU CHƯA BỊ XÓA
+        c.execute("SELECT id, question, answer FROM faqs WHERE is_trashed = false ORDER BY created_at DESC")
+        faqs = [{"id": r[0], "file_name": f"FAQ_{r[0]}", "question": r[1], "answer": r[2]} for r in c.fetchall()]
         c.close()
-        faqs = [{"id": r[0], "file_name": f"FAQ_{r[0]}", "question": r[1], "answer": r[2]} for r in rows]
         return faqs
     except Exception as e:
         return {"status": "error", "message": str(e)}
     finally:
-        if conn:
-            return_db_connection(conn)
+        if conn: return_db_connection(conn)
+@app.get("/admin/faqs/trashed")
+def get_trashed_faqs():
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        # 💡 LẤY NHỮNG CÂU ĐÃ NẰM TRONG THÙNG RÁC
+        c.execute("SELECT id, question, answer FROM faqs WHERE is_trashed = true ORDER BY created_at DESC")
+        faqs = [{"id": r[0], "question": r[1], "answer": r[2]} for r in c.fetchall()]
+        c.close()
+        return faqs
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
+@app.put("/admin/faqs/{faq_id}/trash")
+def trash_faq(faq_id: int):
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        # 💡 ĐƯA VÀO THÙNG RÁC THAY VÌ XÓA VĨNH VIỄN
+        c.execute("UPDATE faqs SET is_trashed = true WHERE id = %s", (faq_id,))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
+@app.put("/admin/faqs/{faq_id}/restore")
+def restore_faq(faq_id: int):
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        # 💡 KHÔI PHỤC LẠI
+        c.execute("UPDATE faqs SET is_trashed = false WHERE id = %s", (faq_id,))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
+@app.delete("/admin/faqs/{faq_id}/permanent")
+def delete_faq_permanent(faq_id: int):
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM faqs WHERE id = %s", (faq_id,))
+        conn.commit()
+        c.close()
+        return {"status": "success", "message": "Đã xóa vĩnh viễn"}
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
 
 @app.put("/admin/faqs/{faq_id}")
 def update_faq(faq_id: int, req: EditFaqReq):
@@ -957,24 +1020,6 @@ def update_faq(faq_id: int, req: EditFaqReq):
         if conn:
             return_db_connection(conn)
 
-@app.delete("/admin/faqs/{faq_id}")
-def delete_faq(faq_id: int):
-    """Xóa FAQ khỏi kho"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("DELETE FROM faqs WHERE id = %s", (faq_id,))
-        conn.commit()
-        c.close()
-        return {"status": "success", "message": "Đã xóa FAQ"}
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        return {"status": "error", "message": str(e)}
-    finally:
-        if conn:
-            return_db_connection(conn)
 
 @app.delete("/admin/documents/{filename}")
 def delete_document(filename: str, background_tasks: BackgroundTasks):
