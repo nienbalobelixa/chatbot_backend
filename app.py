@@ -1031,178 +1031,205 @@ def get_system_logs():
 @app.get("/admin/unanswered")
 def get_unanswered():
     conn = None
-    c = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT id, question, username, timestamp FROM unanswered_questions WHERE is_trashed = false ORDER BY timestamp DESC")
         logs = [{"id": r[0], "question": r[1], "username": r[2], "time": r[3]} for r in c.fetchall()]
+        c.close()
         return logs
     except Exception as e:
-        # Nếu có lỗi mạng hoặc SQL, báo lỗi văn minh thay vì sập server
-        return {"status": "error", "message": f"Lỗi truy xuất dữ liệu: {str(e)}"}
+        return {"status": "error", "message": f"Lỗi: {str(e)}"}
     finally:
-        # 🔥 Đỉnh cao là ở đây: Dù code chạy thành công hay báo lỗi, block 'finally' LUÔN LUÔN được gọi để dọn dẹp!
-        if c:
-            c.close()
-        if conn:
-            conn.close()
+        if conn: return_db_connection(conn)
 
 @app.get("/admin/unanswered/trashed")
 def get_trashed_unanswered():
     conn = None
-    c = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT id, question, username, timestamp FROM unanswered_questions WHERE is_trashed = true ORDER BY timestamp DESC")
         logs = [{"id": r[0], "question": r[1], "username": r[2], "time": r[3]} for r in c.fetchall()]
+        c.close()
         return logs
     except Exception as e:
-        return {"status": "error", "message": f"Lỗi truy xuất dữ liệu: {str(e)}"}
+        return {"status": "error", "message": f"Lỗi: {str(e)}"}
     finally:
-        if c: c.close()
-        if conn: conn.close()
+        if conn: return_db_connection(conn)
 
 @app.get("/admin/stats")
 def get_admin_stats():
-    conn = get_db_connection()
-    c = conn.cursor()
-    today = datetime.now()
-    today_str = today.strftime("%Y-%m-%d")
-
-    c.execute("SELECT COUNT(*) FROM chat_history WHERE CAST(timestamp AS TEXT) LIKE %s", (f"{today_str}%",))
-    total_msgs = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(*) FROM unanswered_questions")
-    unanswered = c.fetchone()[0]
-
-    last_7_days = []
-    for i in range(6, -1, -1):
-        day = today - timedelta(days=i)
-        day_db_str = day.strftime("%Y-%m-%d")
-        display_day = day.strftime("%d/%m")
-        c.execute("SELECT COUNT(*) FROM chat_history WHERE CAST(timestamp AS TEXT) LIKE %s", (f"{day_db_str}%",))
-        count = c.fetchone()[0]
-        last_7_days.append({"date": display_day, "count": count})
-
-    c.execute("SELECT sources FROM chat_history WHERE role = 'bot' AND sources != '[]'")
-    all_sources = c.fetchall()
-    doc_counts = {}
-    for row in all_sources:
-        try:
-            sources_list = ast.literal_eval(row[0])
-            for doc in sources_list: doc_counts[doc] = doc_counts.get(doc, 0) + 1
-        except: pass
-
-    top_docs = sorted(doc_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-    c.close()
-    conn.close()
-    return { "total_messages_today": total_msgs, "unanswered_count": unanswered, "top_docs": [{"name": k, "count": v} for k, v in top_docs], "last_7_days": last_7_days }
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        today = datetime.now()
+        today_str = today.strftime("%Y-%m-%d")
+        c.execute("SELECT COUNT(*) FROM chat_history WHERE CAST(timestamp AS TEXT) LIKE %s", (f"{today_str}%",))
+        total_msgs = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM unanswered_questions")
+        unanswered = c.fetchone()[0]
+        
+        last_7_days = []
+        for i in range(6, -1, -1):
+            day = today - timedelta(days=i)
+            day_db_str = day.strftime("%Y-%m-%d")
+            display_day = day.strftime("%d/%m")
+            c.execute("SELECT COUNT(*) FROM chat_history WHERE CAST(timestamp AS TEXT) LIKE %s", (f"{day_db_str}%",))
+            count = c.fetchone()[0]
+            last_7_days.append({"date": display_day, "count": count})
+            
+        c.execute("SELECT sources FROM chat_history WHERE role = 'bot' AND sources != '[]'")
+        all_sources = c.fetchall()
+        doc_counts = {}
+        for row in all_sources:
+            try:
+                sources_list = ast.literal_eval(row[0])
+                for doc in sources_list: doc_counts[doc] = doc_counts.get(doc, 0) + 1
+            except: pass
+        top_docs = sorted(doc_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        c.close()
+        return { "total_messages_today": total_msgs, "unanswered_count": unanswered, "top_docs": [{"name": k, "count": v} for k, v in top_docs], "last_7_days": last_7_days }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
 
 @app.get("/admin/users")
 def get_users():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT id, username, role FROM users")
-    users = [{"id": r[0], "username": r[1], "role": r[2]} for r in c.fetchall()]
-    c.close()
-    conn.close()
-    return users
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT id, username, role FROM users")
+        users = [{"id": r[0], "username": r[1], "role": r[2]} for r in c.fetchall()]
+        c.close()
+        return users
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
 
 @app.put("/admin/users/{username}/role")
 def update_user_role(username: str, req: UpdateRoleReq):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE users SET role = %s WHERE username = %s", (req.role, username))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"status": "success"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE users SET role = %s WHERE username = %s", (req.role, username))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
 
 @app.delete("/admin/unanswered/{q_id}")
 def delete_unanswered(q_id: int):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM unanswered_questions WHERE id = %s", (q_id,))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"status": "success"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM unanswered_questions WHERE id = %s", (q_id,))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
 
 @app.put("/admin/unanswered/{q_id}/trash")
 def trash_unanswered(q_id: int):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE unanswered_questions SET is_trashed = true WHERE id = %s", (q_id,))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"status": "success"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE unanswered_questions SET is_trashed = true WHERE id = %s", (q_id,))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
 
 @app.put("/admin/unanswered/{q_id}/restore")
 def restore_unanswered(q_id: int):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE unanswered_questions SET is_trashed = false WHERE id = %s", (q_id,))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"status": "success"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE unanswered_questions SET is_trashed = false WHERE id = %s", (q_id,))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
 
 @app.post("/users/{username}/avatar")
 async def upload_avatar(username: str, file: UploadFile = File(...)):
+    conn = None
     try:
         import time
         ext = file.filename.split('.')[-1]
-        
-        # Tạo tên file mới
-        new_filename = f"avatar_{username}_{int(time.time())}.{ext}" 
+        new_filename = f"avatar_{username}_{int(time.time())}.{ext}"
         file_bytes = await file.read()
-
-        # 1. Đẩy ảnh thẳng lên Supabase Storage (nhà kho 'avatars')
+        
         try:
             supabase.storage.from_("avatars").upload(new_filename, file_bytes, {"content-type": file.content_type})
         except:
             supabase.storage.from_("avatars").update(new_filename, file_bytes, {"content-type": file.content_type})
-
-        # 2. Lấy link URL công khai
+            
         public_url = supabase.storage.from_("avatars").get_public_url(new_filename)
-
-        # 3. Lưu link URL vào Database
+        
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("UPDATE users SET avatar = %s WHERE username = %s", (public_url, username))
         conn.commit()
         c.close()
-        conn.close()
-        
         return {"status": "success", "avatar_url": public_url}
-    except Exception as e: 
+    except Exception as e:
+        if conn: conn.rollback()
         return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
 
 @app.get("/users/{username}/avatar")
 def get_avatar(username: str):
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT avatar FROM users WHERE username = %s", (username,))
         row = c.fetchone()
         c.close()
-        conn.close()
         if row and row[0]: return {"avatar_url": row[0]}
-    except: pass
+    except:
+        pass
+    finally:
+        if conn: return_db_connection(conn)
     return {"avatar_url": None}
 
 @app.post("/admin/broadcast")
 def broadcast_to_company(req: BroadcastReq):
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT username FROM users WHERE role != 'locked'")
         users = c.fetchall()
         current_time = datetime.now()
-        final_message = f" 📢  **[THÔNG BÁO TỪ BAN GIÁM ĐỐC]**\n\n{req.message}"
+        final_message = f"📢 **[THÔNG BÁO TỪ BAN GIÁM ĐỐC]**\n\n{req.message}"
         sent_count = 0
         for u in users:
             username = u[0]
@@ -1212,31 +1239,36 @@ def broadcast_to_company(req: BroadcastReq):
             sent_count += 1
         conn.commit()
         c.close()
-        conn.close()
         return {"status": "success", "total_sent": sent_count}
     except Exception as e:
+        if conn: conn.rollback()
         return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
 
+# 🔥 ĐÂY LÀ KẺ HỦY DIỆT POOL ĐÃ ĐƯỢC FIX 🔥
 def check_reminders_loop():
     while True:
+        conn = None
         try:
             conn = get_db_connection()
             c = conn.cursor()
             now = datetime.now()
             c.execute("SELECT id, username, task FROM reminders WHERE remind_at <= %s AND is_notified = false", (now,))
             pending = c.fetchall()
-
             for r_id, user, task in pending:
-                msg = f"⏰ **[NHẮC NHỞ CÔNG VIỆC]**: Bạn có việc cần làm ngay bây giờ:\n\n 👉  **{task}**"
+                msg = f"⏰ **[NHẮC NHỞ CÔNG VIỆC]**: Bạn có việc cần làm ngay bây giờ:\n\n👉 **{task}**"
                 c.execute("INSERT INTO notifications (username, message, is_read, session_id, timestamp) VALUES (%s, %s, false, 'broadcast', %s)",
                           (user, msg, now))
                 c.execute("UPDATE reminders SET is_notified = true WHERE id = %s", (r_id,))
-
             conn.commit()
             c.close()
-            conn.close()
         except Exception as e:
             print(f"Lỗi quét nhắc nhở: {e}")
+        finally:
+            # 🌟 Bắt buộc phải có dòng này để trả connection về Pool sau mỗi phút quét!
+            if conn: return_db_connection(conn)
+            
         time.sleep(60)
 
 threading.Thread(target=check_reminders_loop, daemon=True).start()
