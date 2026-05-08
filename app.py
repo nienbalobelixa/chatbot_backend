@@ -823,11 +823,21 @@ def answer_unanswered_question(q_id: int, req: AnswerReq):
         c.execute("INSERT INTO document_permissions (file_name, required_role) VALUES (%s, 'staff') ON CONFLICT (file_name) DO UPDATE SET required_role = 'staff'", (filename,))
 
         if session_id:
-            notification_msg = f" 🔔  **[Cập nhật từ Quản trị viên]**\n\n* 📝  Câu hỏi: {question}*\n\n** 👉  Trả lời:** {req.answer}"
-            c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (%s, %s, %s, %s, %s)", (session_id, username, "bot", notification_msg, "['Phản hồi từ Admin']"))
+            notification_msg = (
+                    f"🔔 **[Cập nhật từ Quản trị viên]**\n\n"
+                    f"📝 *Câu hỏi:* {question}\n\n"
+                    f"✅ **Trả lời:**\n{req.answer}" # Xuống dòng trước câu trả lời
+                )
+            c.execute(
+                "INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (%s, %s, %s, %s, %s)", 
+                (session_id, username, "bot", notification_msg, "['Phản hồi từ Admin']")
+            )
             c.execute("UPDATE chat_sessions SET last_active = %s WHERE id = %s", (current_time, session_id))
-            short_msg = f"Admin đã giải đáp: '{question[:25]}...'"
-            c.execute("INSERT INTO notifications (username, session_id, message, timestamp) VALUES (%s, %s, %s, %s)", (username, session_id, short_msg, current_time))
+            short_msg = f"Admin đã trả lời câu hỏi: '{question[:30]}...'"
+            c.execute(
+                "INSERT INTO notifications (username, session_id, message, timestamp) VALUES (%s, %s, %s, %s)", 
+                (username, session_id, short_msg, current_time)
+            )
         
         c.execute("DELETE FROM unanswered_questions WHERE id = %s", (q_id,))
         conn.commit()
