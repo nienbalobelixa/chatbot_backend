@@ -1,6 +1,7 @@
 import os
 import psycopg2
 from psycopg2 import IntegrityError
+from psycopg2 import pool
 import shutil
 import hashlib
 import uuid
@@ -63,74 +64,131 @@ app.mount("/files", StaticFiles(directory=DOCS_DIR), name="files")
 
 
 # =====================================================================
-# 🛠️ KẾT NỐI DATABASE SUPABASE (POSTGRESQL)
+# 🛠️ KẾT NỐI DATABASE SUPABASE (POSTGRESQL) - CONNECTION POOL
 # =====================================================================
-
-# --- THÊM ĐOẠN NÀY VÀO ---
-
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-# ------------------------
+
+# 🔥 TẠO CONNECTION POOL (Hồ chứa kết nối 5-10 luôn mở)
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+db_pool = None
+
+def init_db_pool():
+    """Khởi tạo Connection Pool - HỒ CHỨA KẾT NỐI"""
+    global db_pool
+    try:
+        db_pool = pool.ThreadedConnectionPool(
+            minconn=5,      # Tối thiểu 5 kết nối luôn mở sẵn
+            maxconn=10,     # Tối đa 10 kết nối cùng lúc
+            dsn=DATABASE_URL,
+            keepalives=1,
+            keepalives_idle=30,      # Ping sau mỗi 30s không hoạt động
+            keepalives_interval=10,  # Nếu không thấy phản hồi, ping lại sau 10s
+            keepalives_count=5,      # Thử tối đa 5 lần trước khi báo lỗi
+            connect_timeout=10,      # Timeout khi kết nối: 10 giây
+            options="-c statement_timeout=30000"  # Timeout statement: 30 giây
+        )
+        print("✅ CONNECTION POOL: Đã khởi tạo thành công! (5-10 kết nối sẵn sàng)")
+    except Exception as e:
+        print(f"❌ CONNECTION POOL: Lỗi khởi tạo: {e}")
+        raise
 
 def get_db_connection():
-    db_url = os.environ.get("DATABASE_URL")
-    # Thêm các tham số keepalives để chống rớt mạng SSL đột ngột
-    return psycopg2.connect(
-        db_url,
-        keepalives=1,
-        keepalives_idle=30,      # Ping sau mỗi 30s không hoạt động
-        keepalives_interval=10,  # Nếu không thấy phản hồi, ping lại sau 10s
-        keepalives_count=5       # Thử tối đa 5 lần trước khi báo lỗi thực sự
-    )
+    """LẤY CONNECTION TỪ HỒ CHỨA thay vì tạo mới"""
+    global db_pool
+    if db_pool is None:
+        raise Exception("❌ Connection Pool chưa được khởi tạo!")
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            conn = db_pool.getconn()
+            # Kiểm tra connection có còn sống không
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.close()
+                return conn
+            except Exception:
+                conn.close()
+                db_pool.putconn(conn, close=True)
+                if attempt < max_retries - 1:
+                    continue
+                raise
+        except Exception as e:
+            print(f"⚠️ Lỗi lấy connection (lần {attempt+1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                raise Exception(f"❌ Không thể lấy connection từ pool sau {max_retries} lần thử")
+    
+    raise Exception("❌ Không thể lấy connection từ pool")
+
+def return_db_connection(conn, close=False):
+    """TRẢ CONNECTION VỀ HỒ CHỨA"""
+    global db_pool
+    if conn and db_pool:
+        try:
+            db_pool.putconn(conn, close=close)
+        except Exception as e:
+            print(f"⚠️ Lỗi trả connection: {e}")
 def init_db():
+    """Khởi tạo các bảng database"""
+    init_db_pool()  # 🔥 Khởi tạo Connection Pool TRƯỚC
+    
     conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY, username TEXT UNIQUE, password TEXT, 
-        role TEXT DEFAULT 'staff', is_onboarded BOOLEAN DEFAULT false, avatar TEXT)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS document_permissions (
-        file_name TEXT PRIMARY KEY, required_role TEXT DEFAULT 'staff')''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS chat_sessions (
-        id TEXT PRIMARY KEY, username TEXT, title TEXT, last_active TIMESTAMP)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS chat_history (
-        id SERIAL PRIMARY KEY, session_id TEXT, username TEXT, role TEXT, 
-        content TEXT, sources TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS unanswered_questions (
-        id SERIAL PRIMARY KEY, question TEXT, username TEXT, session_id TEXT, 
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_trashed BOOLEAN DEFAULT false)''')
-    c.execute("ALTER TABLE unanswered_questions ADD COLUMN IF NOT EXISTS is_trashed BOOLEAN DEFAULT false")
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS feedbacks (
-        id SERIAL PRIMARY KEY, session_id TEXT, username TEXT, bot_response TEXT, 
-        rating TEXT, reason TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS notifications (
-        id SERIAL PRIMARY KEY, username TEXT, session_id TEXT, message TEXT, 
-        is_read BOOLEAN DEFAULT false, is_trashed BOOLEAN DEFAULT false, 
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS reminders (
-        id SERIAL PRIMARY KEY, username TEXT, task TEXT, remind_at TIMESTAMP, 
-        is_done BOOLEAN DEFAULT false, is_notified BOOLEAN DEFAULT false)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS faqs (
-        id SERIAL PRIMARY KEY, question TEXT, answer TEXT, unanswered_id INTEGER, 
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    try:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY, username TEXT UNIQUE, password TEXT, 
+            role TEXT DEFAULT 'staff', is_onboarded BOOLEAN DEFAULT false, avatar TEXT)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS document_permissions (
+            file_name TEXT PRIMARY KEY, required_role TEXT DEFAULT 'staff')''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS chat_sessions (
+            id TEXT PRIMARY KEY, username TEXT, title TEXT, last_active TIMESTAMP)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS chat_history (
+            id SERIAL PRIMARY KEY, session_id TEXT, username TEXT, role TEXT, 
+            content TEXT, sources TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS unanswered_questions (
+            id SERIAL PRIMARY KEY, question TEXT, username TEXT, session_id TEXT, 
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_trashed BOOLEAN DEFAULT false)''')
+        c.execute("ALTER TABLE unanswered_questions ADD COLUMN IF NOT EXISTS is_trashed BOOLEAN DEFAULT false")
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS feedbacks (
+            id SERIAL PRIMARY KEY, session_id TEXT, username TEXT, bot_response TEXT, 
+            rating TEXT, reason TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS notifications (
+            id SERIAL PRIMARY KEY, username TEXT, session_id TEXT, message TEXT, 
+            is_read BOOLEAN DEFAULT false, is_trashed BOOLEAN DEFAULT false, 
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS reminders (
+            id SERIAL PRIMARY KEY, username TEXT, task TEXT, remind_at TIMESTAMP, 
+            is_done BOOLEAN DEFAULT false, is_notified BOOLEAN DEFAULT false)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS faqs (
+            id SERIAL PRIMARY KEY, question TEXT, answer TEXT, unanswered_id INTEGER, 
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Tự động cấy Admin mới (Username: admin1 | Pass: 123456)
-    admin_hashed = hashlib.sha256("123456".encode()).hexdigest()
-    c.execute("INSERT INTO users (username, password, role) VALUES (%s, %s, %s) ON CONFLICT (username) DO NOTHING", 
-              ("admin1", admin_hashed, "admin"))
+        # Tự động cấy Admin mới (Username: admin1 | Pass: 123456)
+        admin_hashed = hashlib.sha256("123456".encode()).hexdigest()
+        c.execute("INSERT INTO users (username, password, role) VALUES (%s, %s, %s) ON CONFLICT (username) DO NOTHING", 
+                  ("admin1", admin_hashed, "admin"))
 
-    conn.commit()
-    c.close()
-    conn.close()
+        conn.commit()
+        c.close()
+        print("✅ DATABASE: Tất cả bảng dữ liệu đã sẵn sàng!")
+    except Exception as e:
+        print(f"❌ DATABASE: Lỗi khởi tạo: {e}")
+        conn.rollback()
+    finally:
+        return_db_connection(conn)
 
 init_db()
 
@@ -229,39 +287,61 @@ class BroadcastReq(BaseModel): message: str; admin_username: str = None
 
 @app.post("/feedback")
 def save_feedback(req: FeedbackReq, username: str = "guest"):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("INSERT INTO feedbacks (session_id, username, bot_response, rating, reason) VALUES (%s, %s, %s, %s, %s)", 
-              (req.session_id, username, req.bot_response, req.rating, req.reason))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"status": "success"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("INSERT INTO feedbacks (session_id, username, bot_response, rating, reason) VALUES (%s, %s, %s, %s, %s)", 
+                  (req.session_id, username, req.bot_response, req.rating, req.reason))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.get("/sessions/{username}")
 async def get_sessions(username: str):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT id, title, last_active FROM chat_sessions WHERE username = %s ORDER BY last_active DESC", (username,))
-    rows = c.fetchall()
-    c.close()
-    conn.close()
-    return [{"id": r[0], "title": r[1], "last_active": r[2]} for r in rows]
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT id, title, last_active FROM chat_sessions WHERE username = %s ORDER BY last_active DESC", (username,))
+        rows = c.fetchall()
+        c.close()
+        return [{"id": r[0], "title": r[1], "last_active": r[2]} for r in rows]
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.get("/history/{session_id}")
 async def get_chat_history(session_id: str):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT role, content, sources, timestamp FROM chat_history WHERE session_id = %s ORDER BY timestamp ASC", (session_id,))
-    rows = c.fetchall()
-    c.close()
-    conn.close()
-    history = []
-    for r in rows:
-        try: sources = ast.literal_eval(r[2]) if r[2] else []
-        except: sources = []
-        history.append({"role": r[0], "text": r[1], "sources": sources, "time": r[3]})
-    return history
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT role, content, sources, timestamp FROM chat_history WHERE session_id = %s ORDER BY timestamp ASC", (session_id,))
+        rows = c.fetchall()
+        c.close()
+        history = []
+        for r in rows:
+            try: 
+                sources = ast.literal_eval(r[2]) if r[2] else []
+            except: 
+                sources = []
+            history.append({"role": r[0], "text": r[1], "sources": sources, "time": r[3]})
+        return history
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 def rewrite_query(original_query: str, history_text: str = "") -> str:
     try:
@@ -365,13 +445,18 @@ Nếu Giám đốc yêu cầu nhắc nhở, thêm chính xác: [[REMINDER: {{"ta
         conn.commit()
 
         c.close()
-        conn.close()
         return { "answer": ai_answer, "sources": sources, "follow_ups": follow_ups, "session_id": s_id, "time": current_time.strftime("%H:%M - %d/%m/%Y") }
     except Exception as e:
+        if conn:
+            conn.rollback()
         return {"answer": f"Lỗi hệ thống AI: {str(e)}", "status": "error"}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.post("/ask_with_file")
 async def ask_with_file(username: str, role: str = 'staff', question: str = Form(""), session_id: str = Form(""), file: UploadFile = File(...)):
+    conn = None
     try:
         s_id = session_id or str(uuid.uuid4())
         is_new_session = not session_id
@@ -426,7 +511,8 @@ Lịch sử: {history_text}"""
                 c.execute("INSERT INTO reminders (username, task, remind_at) VALUES (%s, %s, %s)", (username, rem_data['task'], rem_data['time']))
                 ai_answer_raw = ai_answer_raw.split("[[REMINDER:")[0].strip()
                 ai_answer = ai_answer_raw
-            except Exception as e: print(f"Lỗi phân tích JSON: {e}")
+            except Exception as e: 
+                print(f"Lỗi phân tích JSON: {e}")
             
         if "---SUGGESTIONS---" in ai_answer_raw:
             parts = ai_answer_raw.split("---SUGGESTIONS---")
@@ -444,10 +530,14 @@ Lịch sử: {history_text}"""
 
         conn.commit()
         c.close()
-        conn.close()
         return { "answer": ai_answer, "sources": [file.filename], "follow_ups": follow_ups, "session_id": s_id, "time": current_time.strftime("%H:%M - %d/%m/%Y") }
     except Exception as e:
+        if conn:
+            conn.rollback()
         return {"answer": f"Lỗi xử lý tệp Backend: {str(e)}", "status": "error"}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.post("/register")
 async def register(user: User):
@@ -458,18 +548,21 @@ async def register(user: User):
     if not username.isalnum(): return {"status": "error", "message": "Tên không chứa ký tự đặc biệt!"}
     
     hashed = hashlib.sha256(password.encode()).hexdigest()
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("INSERT INTO users (username, password, role) VALUES (%s, %s, 'staff')", (username, hashed))
         conn.commit()
         c.close()
-        conn.close()
         return {"status": "success", "message": "Đăng ký tài khoản thành công!"}
     except IntegrityError:
         return {"status": "error", "message": "Tên đăng nhập này đã tồn tại. Vui lòng chọn tên khác!"}
     except Exception as e:
         return {"status": "error", "message": f"Lỗi hệ thống: {str(e)}"}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.post("/login")
 async def login(user: User):
@@ -478,37 +571,51 @@ async def login(user: User):
     if not username or not password: return {"status": "error", "message": "Vui lòng nhập đầy đủ!"}
     
     hashed = hashlib.sha256(password.encode()).hexdigest()
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT username, role, is_onboarded FROM users WHERE username = %s AND password = %s", (username, hashed))
-    record = c.fetchone()
-    c.close()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT username, role, is_onboarded FROM users WHERE username = %s AND password = %s", (username, hashed))
+        record = c.fetchone()
+        c.close()
 
-    if record:
-        return {"status": "success", "username": record[0], "role": record[1], "is_onboarded": bool(record[2]), "message": "Thành công!"}
-    return {"status": "error", "message": "Sai tên đăng nhập hoặc mật khẩu!"}
+        if record:
+            return {"status": "success", "username": record[0], "role": record[1], "is_onboarded": bool(record[2]), "message": "Thành công!"}
+        return {"status": "error", "message": "Sai tên đăng nhập hoặc mật khẩu!"}
+    except Exception as e:
+        return {"status": "error", "message": f"Lỗi hệ thống: {str(e)}"}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.put("/users/{username}/onboarded")
 def complete_onboarding(username: str):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE users SET is_onboarded = true WHERE username = %s", (username,))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"status": "success"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE users SET is_onboarded = true WHERE username = %s", (username,))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 # 1. API kiểm tra trạng thái Onboarding khi user đăng nhập
 @app.get("/api/onboarding/{username}")
 async def check_onboarding(username: str):
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT is_onboarded FROM users WHERE username = %s", (username,))
         result = c.fetchone()
         c.close()
-        conn.close()
         
         if result:
             # Nếu is_onboarded là True -> đã hoàn thành hết
@@ -516,10 +623,14 @@ async def check_onboarding(username: str):
         return {"is_completed": False}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 # 2. API đánh dấu đã hoàn thành khi bấm nút "Đã Nắm Rõ"
 @app.post("/api/onboarding/{username}/complete")
-async def complete_onboarding(username: str):
+async def complete_onboarding_endpoint(username: str):
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
@@ -527,118 +638,181 @@ async def complete_onboarding(username: str):
         c.execute("UPDATE users SET is_onboarded = TRUE WHERE username = %s", (username,))
         conn.commit()
         c.close()
-        conn.close()
         return {"status": "success", "message": "Đã lưu trạng thái hoàn thành vào Database"}
     except Exception as e:
+        if conn:
+            conn.rollback()
         return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.put("/sessions/{session_id}/rename")
 def rename_session(session_id: str, req: RenameRequest):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE chat_sessions SET title = %s WHERE id = %s", (req.title, session_id))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"message": "Đã đổi tên thành công"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE chat_sessions SET title = %s WHERE id = %s", (req.title, session_id))
+        conn.commit()
+        c.close()
+        return {"message": "Đã đổi tên thành công"}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.delete("/sessions/{session_id}")
 def delete_session(session_id: str):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM chat_sessions WHERE id = %s", (session_id,))
-    c.execute("DELETE FROM chat_history WHERE session_id = %s", (session_id,))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"message": "Đã xóa thành công"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM chat_sessions WHERE id = %s", (session_id,))
+        c.execute("DELETE FROM chat_history WHERE session_id = %s", (session_id,))
+        conn.commit()
+        c.close()
+        return {"message": "Đã xóa thành công"}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.get("/sessions/{session_id}/summarize")
 def summarize_session(session_id: str):
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT role, content FROM chat_history WHERE session_id = %s ORDER BY timestamp ASC", (session_id,))
         rows = c.fetchall()
         c.close()
-        conn.close()
         if not rows: return {"summary": "Chưa có nội dung."}
         chat_text = "\n".join([f"{r[0]}: {r[1]}" for r in rows])
         prompt = f"Tóm tắt ngắn gọn 1-2 câu:\n\n{chat_text}"
         summary_text = generate_content_with_fallback(prompt)
         return {"summary": summary_text}
-    except Exception: return {"summary": "Lỗi hệ thống."}
+    except Exception as e:
+        return {"summary": f"Lỗi hệ thống: {str(e)}"}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.get("/notifications/{username}") 
 def get_notifications(username: str):
     conn = None
-    c = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT id, session_id, message, is_read, timestamp FROM notifications WHERE username = %s AND is_trashed = false ORDER BY timestamp DESC", (username,))
         rows = c.fetchall()
+        c.close()
         return [{"id": r[0], "session_id": r[1], "message": r[2], "is_read": bool(r[3]), "time": r[4]} for r in rows]
     except Exception as e:
         return {"status": "error", "message": str(e)}
     finally:
-        if c: c.close()
-        if conn: conn.close()
+        if conn:
+            return_db_connection(conn)
 @app.get("/notifications/{username}/trash")
 def get_trashed_notifications(username: str):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT id, session_id, message, is_read, timestamp FROM notifications WHERE username = %s AND is_trashed = true ORDER BY timestamp DESC", (username,))
-    rows = c.fetchall()
-    c.close()
-    conn.close()
-    return [{"id": r[0], "session_id": r[1], "message": r[2], "is_read": bool(r[3]), "time": r[4]} for r in rows]
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT id, session_id, message, is_read, timestamp FROM notifications WHERE username = %s AND is_trashed = true ORDER BY timestamp DESC", (username,))
+        rows = c.fetchall()
+        c.close()
+        return [{"id": r[0], "session_id": r[1], "message": r[2], "is_read": bool(r[3]), "time": r[4]} for r in rows]
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.put("/notifications/{notif_id}/trash")
 def trash_notification(notif_id: int):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE notifications SET is_trashed = true WHERE id = %s", (notif_id,))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"status": "success"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE notifications SET is_trashed = true WHERE id = %s", (notif_id,))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.put("/notifications/{notif_id}/restore")
 def restore_notification(notif_id: int):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE notifications SET is_trashed = false WHERE id = %s", (notif_id,))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"status": "success"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE notifications SET is_trashed = false WHERE id = %s", (notif_id,))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.put("/notifications/{notif_id}/read")
 def mark_notif_read(notif_id: int):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE notifications SET is_read = true WHERE id = %s", (notif_id,))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"status": "success"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE notifications SET is_read = true WHERE id = %s", (notif_id,))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.delete("/notifications/{notif_id}")
 def delete_notification(notif_id: int):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM notifications WHERE id = %s", (notif_id,))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"status": "success"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM notifications WHERE id = %s", (notif_id,))
+        conn.commit()
+        c.close()
+        return {"status": "success"}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.post("/admin/answer_unanswered/{q_id}")
 def answer_unanswered_question(q_id: int, req: AnswerReq):
-    conn = get_db_connection()
-    c = conn.cursor()
+    conn = None
     try:
+        conn = get_db_connection()
+        c = conn.cursor()
         c.execute("SELECT session_id, question, username FROM unanswered_questions WHERE id = %s", (q_id,))
         row = c.fetchone()
         if not row: return {"status": "error", "message": "Không tìm thấy câu hỏi"}
@@ -665,14 +839,19 @@ def answer_unanswered_question(q_id: int, req: AnswerReq):
         
         c.execute("DELETE FROM unanswered_questions WHERE id = %s", (q_id,))
         conn.commit()
-        return {"status": "success"}
-    except Exception as e: return {"status": "error", "message": str(e)}
-    finally:
         c.close()
-        conn.close()
+        return {"status": "success"}
+    except Exception as e: 
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.post("/admin/upload")
 async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...), role: str = Form(...)):
+    conn = None
     try:
         file_bytes = await file.read()
         
@@ -689,38 +868,55 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
         c.execute("INSERT INTO document_permissions (file_name, required_role) VALUES (%s, %s) ON CONFLICT (file_name) DO UPDATE SET required_role = EXCLUDED.required_role", (file.filename, role))
         conn.commit()
         c.close()
-        conn.close()
         
         # 3. Tải file lên xong, trả về ngay cho UI
         background_tasks.add_task(subprocess.run, ["python", "ingest.py"], check=False)
         return {"status": "success", "message": f"Đã tải lên Supabase thành công! File {file.filename} sẽ được xử lý nền."}
-    except Exception as e: 
+    except Exception as e:
+        if conn:
+            conn.rollback()
         return {"status": "error", "error": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.get("/admin/documents")
 def get_documents():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT file_name, file_name, required_role FROM document_permissions WHERE file_name NOT LIKE 'FAQ_%'")
-    docs = [{"id": r[0], "file_name": r[1], "role": r[2]} for r in c.fetchall()]
-    c.close()
-    conn.close()
-    return docs
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT file_name, file_name, required_role FROM document_permissions WHERE file_name NOT LIKE 'FAQ_%'")
+        docs = [{"id": r[0], "file_name": r[1], "role": r[2]} for r in c.fetchall()]
+        c.close()
+        return docs
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.get("/admin/faqs")
 def get_faqs():
-    conn = get_db_connection()
-    c = conn.cursor()
-    # 🔥 ĐỌC FAQ TỪ DATABASE THAY VÌ FILE SYSTEM
-    c.execute("SELECT id, question, answer FROM faqs ORDER BY created_at DESC")
-    rows = c.fetchall()
-    c.close()
-    conn.close()
-    faqs = [{"id": r[0], "file_name": f"FAQ_{r[0]}", "question": r[1], "answer": r[2]} for r in rows]
-    return faqs
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        # 🔥 ĐỌC FAQ TỪ DATABASE THAY VÌ FILE SYSTEM
+        c.execute("SELECT id, question, answer FROM faqs ORDER BY created_at DESC")
+        rows = c.fetchall()
+        c.close()
+        faqs = [{"id": r[0], "file_name": f"FAQ_{r[0]}", "question": r[1], "answer": r[2]} for r in rows]
+        return faqs
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.put("/admin/faqs/{faq_id}")
 def update_faq(faq_id: int, req: EditFaqReq):
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
@@ -750,63 +946,95 @@ def update_faq(faq_id: int, req: EditFaqReq):
         
         conn.commit()
         c.close()
-        conn.close()
         return {"status": "success"}
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.delete("/admin/faqs/{faq_id}")
 def delete_faq(faq_id: int):
     """Xóa FAQ khỏi kho"""
+    conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("DELETE FROM faqs WHERE id = %s", (faq_id,))
         conn.commit()
         c.close()
-        conn.close()
         return {"status": "success", "message": "Đã xóa FAQ"}
     except Exception as e:
+        if conn:
+            conn.rollback()
         return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.delete("/admin/documents/{filename}")
 def delete_document(filename: str, background_tasks: BackgroundTasks):
     # 1. Xóa trong PostgreSQL
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM document_permissions WHERE file_name = %s", (filename,))
-    conn.commit()
-    c.close()
-    conn.close()
-    
-    # 2. Xóa trên Supabase Storage
+    conn = None
     try:
-        supabase.storage.from_("documents").remove([filename])
-    except Exception as e:
-        print("Lỗi xóa file storage:", e)
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM document_permissions WHERE file_name = %s", (filename,))
+        conn.commit()
+        c.close()
         
-    # 3. Cập nhật lại ChromaDB
-    background_tasks.add_task(subprocess.run, ["python", "ingest.py"])
-    return {"message": f"Đã xóa file {filename} khỏi Supabase."}
+        # 2. Xóa trên Supabase Storage
+        try:
+            supabase.storage.from_("documents").remove([filename])
+        except Exception as e:
+            print("Lỗi xóa file storage:", e)
+            
+        # 3. Cập nhật lại ChromaDB
+        background_tasks.add_task(subprocess.run, ["python", "ingest.py"])
+        return {"message": f"Đã xóa file {filename} khỏi Supabase."}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.post("/admin/set-permission")
 def set_document_permission(file_name: str, role: str):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE document_permissions SET required_role = %s WHERE file_name = %s", (role, file_name))
-    conn.commit()
-    c.close()
-    conn.close()
-    return {"status": "success", "message": f"Đã cập nhật quyền {file_name} thành {role}"}
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE document_permissions SET required_role = %s WHERE file_name = %s", (role, file_name))
+        conn.commit()
+        c.close()
+        return {"status": "success", "message": f"Đã cập nhật quyền {file_name} thành {role}"}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.get("/admin/logs")
 def get_system_logs():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT session_id, username, role, content, timestamp FROM chat_history ORDER BY timestamp DESC LIMIT 100")
-    logs = [{"session_id": r[0], "username": r[1], "role": r[2], "content": r[3], "time": r[4]} for r in c.fetchall()]
-    c.close()
-    conn.close()
-    return logs
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT session_id, username, role, content, timestamp FROM chat_history ORDER BY timestamp DESC LIMIT 100")
+        logs = [{"session_id": r[0], "username": r[1], "role": r[2], "content": r[3], "time": r[4]} for r in c.fetchall()]
+        c.close()
+        return logs
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.get("/admin/unanswered")
 def get_unanswered():
