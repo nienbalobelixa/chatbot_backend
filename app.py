@@ -103,27 +103,19 @@ def get_db_connection():
         raise Exception("❌ Connection Pool chưa được khởi tạo!")
     
     max_retries = 3
+    last_error = None
+    
     for attempt in range(max_retries):
         try:
             conn = db_pool.getconn()
-            # Kiểm tra connection có còn sống không
-            try:
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1")
-                cursor.close()
-                return conn
-            except Exception:
-                conn.close()
-                db_pool.putconn(conn, close=True)
-                if attempt < max_retries - 1:
-                    continue
-                raise
+            return conn
         except Exception as e:
+            last_error = e
             print(f"⚠️ Lỗi lấy connection (lần {attempt+1}/{max_retries}): {e}")
-            if attempt == max_retries - 1:
-                raise Exception(f"❌ Không thể lấy connection từ pool sau {max_retries} lần thử")
+            if attempt < max_retries - 1:
+                time.sleep(0.5)  # Chờ 500ms trước khi retry
     
-    raise Exception("❌ Không thể lấy connection từ pool")
+    raise Exception(f"❌ Không thể lấy connection từ pool sau {max_retries} lần thử. Lỗi cuối: {last_error}")
 
 def return_db_connection(conn, close=False):
     """TRẢ CONNECTION VỀ HỒ CHỨA"""
