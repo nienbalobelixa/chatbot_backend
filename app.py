@@ -10,6 +10,7 @@ import ast
 import subprocess
 from datetime import datetime, timedelta
 from typing import Optional
+import unicodedata
 import re 
 import json
 import threading
@@ -870,24 +871,39 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
     conn = None
     try:
         file_bytes = await file.read()
-        
-        # 1. Quăng thẳng file lên Supabase Storage
+
+        # 💡 BỘ LỌC THÔNG MINH: Chuyển tên file thành Tiếng Việt không dấu và xóa khoảng trắng
+        def sanitize_filename(filename: str) -> str:
+            # Chuyển tiếng Việt có dấu thành không dấu
+            normalized = unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore').decode('utf-8')
+            # Thay khoảng trắng thành dấu gạch dưới
+            normalized = normalized.replace(' ', '_')
+            # Xóa sạch các ký tự đặc biệt (chỉ giữ lại chữ, số, dấu chấm và gạch dưới)
+            safe_name = re.sub(r'[^\w\.-]', '', normalized)
+            return safe_name
+
+        safe_filename = sanitize_filename(file.filename)
+
+        # 1. Quăng thẳng file lên Supabase Storage với TÊN AN TOÀN
         try:
-            supabase.storage.from_("documents").upload(file.filename, file_bytes)
+            supabase.storage.from_("documents").upload(safe_filename, file_bytes)
         except Exception:
             # Nếu file đã tồn tại thì ghi đè
-            supabase.storage.from_("documents").update(file.filename, file_bytes)
-            
-        # 2. Lưu quyền vào PostgreSQL
+            supabase.storage.from_("documents").update(safe_filename, file_bytes)
+
+        # 2. Lưu quyền vào PostgreSQL với TÊN AN TOÀN
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("INSERT INTO document_permissions (file_name, required_role) VALUES (%s, %s) ON CONFLICT (file_name) DO UPDATE SET required_role = EXCLUDED.required_role", (file.filename, role))
+        c.execute("INSERT INTO document_permissions (file_name, required_role) VALUES (%s, %s) ON CONFLICT (file_name) DO UPDATE SET required_role = EXCLUDED.required_role", (safe_filename, role))
         conn.commit()
         c.close()
-        
+
         # 3. Tải file lên xong, trả về ngay cho UI
         background_tasks.add_task(subprocess.run, ["python", "ingest.py"], check=False)
-        return {"status": "success", "message": f"Đã tải lên Supabase thành công! File {file.filename} sẽ được xử lý nền."}
+        
+        # Báo cáo cho Frontend biết tên file đã được đổi thành công
+        return {"status": "success", "message": f"Tải lên thành công! File được lưu với tên: {safe_filename}"}
+        
     except Exception as e:
         if conn:
             conn.rollback()
