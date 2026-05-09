@@ -2,6 +2,7 @@ import os
 import psycopg2
 from psycopg2 import IntegrityError
 from psycopg2 import pool
+import docx
 import shutil
 import hashlib
 import uuid
@@ -480,9 +481,19 @@ Lịch sử: {history_text}
 Hãy quan sát kỹ bức ảnh và trả lời. Thêm tag [[REMINDER: {{"task": "...", "time": "YYYY-MM-DD HH:MM:SS"}}]] nếu cần."""
             ai_prompt_data = [img, system_prompt]
         else:
+            # 💡 Sửa từ đoạn dòng 1011
             if file_extension == 'pdf':
                 pdf_reader = PyPDF2.PdfReader(io.BytesIO(await file.read()))
-                for page in pdf_reader.pages: extracted_text += page.extract_text() or ""
+                for page in pdf_reader.pages: 
+                    extracted_text += page.extract_text() or ""
+            
+        # 🌟 ĐOẠN MỚI CHO FILE WORD (.docx)
+            elif file_extension in ['docx', 'doc']:
+                file_bytes = io.BytesIO(await file.read())
+                doc = docx.Document(file_bytes)
+                # Rút trích văn bản từ các đoạn văn trong file Word
+                extracted_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+            
             elif file_extension == 'txt':
                 extracted_text = (await file.read()).decode('utf-8')
             else:

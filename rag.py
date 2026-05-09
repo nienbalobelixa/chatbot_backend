@@ -1,4 +1,5 @@
 import os
+import docx     
 import psycopg2
 from langchain_chroma import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings

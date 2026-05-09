@@ -1,7 +1,8 @@
 import os
 import shutil
 from supabase import create_client, Client
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
+# 💡 ĐÃ THÊM: Docx2txtLoader để đọc file Word
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -51,10 +52,10 @@ def main():
 
     # 2. Xử lý như bình thường
     if not os.path.exists(DOCS) or not os.listdir(DOCS):
-        print("  ❌  Không có file nào trong thư mục!")
+        print(" ❌ Không có file nào trong thư mục!")
         return
         
-    print("  📂  Đang quét các file trong:", DOCS)
+    print(" 📂 Đang quét các file trong:", DOCS)
     all_files = os.listdir(DOCS)
     raw_documents = []
     
@@ -66,6 +67,9 @@ def main():
                 loaded_docs = PyPDFLoader(path).load()
             elif file.endswith(".txt"):
                 loaded_docs = TextLoader(path, encoding="utf-8").load()
+            # 🌟 ĐÃ THÊM: Xử lý file Word
+            elif file.endswith(".docx") or file.endswith(".doc"):
+                loaded_docs = Docx2txtLoader(path).load()
             else:
                 continue
                 
@@ -78,39 +82,34 @@ def main():
             
     if not raw_documents: return
         
-    print("  ✂️  Đang chia nhỏ tài liệu...")
+    print(" ✂️ Đang chia nhỏ tài liệu...")
     splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100)
     docs = splitter.split_documents(raw_documents)
     
-    if os.path.exists(DB):
-        shutil.rmtree(DB)
-        
-    # ... (Các đoạn đọc file và băm nhỏ ở trên giữ nguyên) ...
-
     # 3. LÀM MỚI VECTOR DB CHUẨN ENTERPRISE (CHỐNG XUNG ĐỘT)
     print("🧠 Đang khởi tạo mô hình Embedding...")
     api_key = os.environ.get("GEMINI_API_KEY_1") or os.environ.get("GEMINI_API_KEY")
     embedding = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=api_key)
 
     # KHÔNG dùng shutil.rmtree nữa. Chúng ta kết nối vào DB và xóa sạch dữ liệu bên trong.
-    print("  🗑️  Đang dọn dẹp bộ nhớ cũ một cách an toàn...")
+    print(" 🗑️ Đang dọn dẹp bộ nhớ cũ một cách an toàn...")
     if os.path.exists(DB):
         try:
             db_old = Chroma(persist_directory=DB, embedding_function=embedding)
             db_old.delete_collection() # Lệnh này chỉ xóa dữ liệu, giữ nguyên file vật lý nên không bao giờ bị lỗi khóa ổ cứng
-            print("  ✅  Đã dọn dẹp xong dữ liệu cũ!")
+            print(" ✅ Đã dọn dẹp xong dữ liệu cũ!")
         except Exception as e:
-            print(f"  ⚠️  Collection trống hoặc chưa tạo: {e}")
+            print(f" ⚠️ Collection trống hoặc chưa tạo: {e}")
 
     # 4. Lưu dữ liệu mới
-    print("  💾  Đang nạp kiến thức mới vào ChromaDB...")
+    print(" 💾 Đang nạp kiến thức mới vào ChromaDB...")
     Chroma.from_documents(
         documents=docs,
         embedding=embedding,
         persist_directory=DB
     )
     
-    print("  ✨  CHÚC MỪNG SẾP! Hệ thống đã nạp xong tri thức mới.")
+    print(" ✨ CHÚC MỪNG SẾP! Hệ thống đã nạp xong tri thức mới.")
 
 if __name__ == "__main__":
     main()
