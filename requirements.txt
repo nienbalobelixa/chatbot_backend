@@ -25,6 +25,7 @@ PyPDF2
 pypdf
 Pillow
 python-docx
+docx2txt
 
 
 #supabase

@@ -15,6 +15,7 @@ import re
 import json
 import threading
 import time
+import subprocess
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -865,6 +866,18 @@ def answer_unanswered_question(q_id: int, req: AnswerReq):
     finally:
         if conn:
             return_db_connection(conn)
+
+def run_ingest_safely():
+    print("⏳ Đang đợi Supabase lưu file (2 giây)...")
+    time.sleep(2)
+    print("⚙️ Bắt đầu chạy ingest.py để nạp não cho AI...")
+    
+    # Chạy lệnh và quay lén (capture) lại toàn bộ log/lỗi
+    result = subprocess.run(["python", "ingest.py"], capture_output=True, text=True)
+    
+    print("✅ LOG INGEST (Thành công):\n", result.stdout)
+    if result.stderr:
+        print("❌ LỖI INGEST (Thất bại):\n", result.stderr)
 
 @app.post("/admin/upload")
 async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...), role: str = Form(...)):
