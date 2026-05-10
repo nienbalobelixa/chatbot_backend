@@ -154,6 +154,7 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS unanswered_questions (
             id SERIAL PRIMARY KEY, question TEXT, username TEXT, session_id TEXT, 
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_trashed BOOLEAN DEFAULT false)''')
+        c.execute("ALTER TABLE unanswered_questions ADD COLUMN IF NOT EXISTS draft_answer TEXT")
         c.execute("ALTER TABLE unanswered_questions ADD COLUMN IF NOT EXISTS is_trashed BOOLEAN DEFAULT false")
         
         c.execute('''CREATE TABLE IF NOT EXISTS feedbacks (
@@ -1192,16 +1193,16 @@ def get_unanswered():
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        # 💡 Lấy thêm draft_answer và reference_sources
-        c.execute("SELECT id, question, username, timestamp, draft_answer, reference_sources FROM unanswered_questions WHERE is_trashed = false ORDER BY timestamp DESC")
-        logs = [{"id": r[0], "question": r[1], "username": r[2], "time": r[3], "draft_answer": r[4], "reference_sources": r[5]} for r in c.fetchall()]
+        # 💡 SỬA LỆNH SQL: Lấy thêm draft_answer
+        c.execute("SELECT id, question, username, timestamp, draft_answer FROM unanswered_questions WHERE is_trashed = false ORDER BY timestamp DESC")
+        # 💡 SỬA KẾT QUẢ TRẢ VỀ: Đẩy draft_answer (r[4]) cho Frontend
+        logs = [{"id": r[0], "question": r[1], "username": r[2], "time": r[3], "draft_answer": r[4]} for r in c.fetchall()]
         return logs
     except Exception as e:
         return {"status": "error", "message": f"Lỗi truy xuất dữ liệu: {str(e)}"}
     finally:
         if c: c.close()
-        if conn: 
-            return_db_connection(conn)  #trả kết nối
+        if conn: return_db_connection(conn) # 💡 Trả kết nối an toàn
 
 @app.post("/admin/train_and_respond/{q_id}")
 def train_and_respond(q_id: int, req: AnswerReq, background_tasks: BackgroundTasks):
@@ -1336,6 +1337,40 @@ def delete_unanswered(q_id: int):
         conn.commit()
         c.close()
         return {"status": "success"}
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
+
+@app.post("/admin/generate_draft/{q_id}")
+def generate_draft_with_style(q_id: int, style: str = "chuyên nghiệp"):
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # 1. Lấy nội dung câu hỏi
+        c.execute("SELECT question, username FROM unanswered_questions WHERE id = %s", (q_id,))
+        row = c.fetchone()
+        if not row: return {"status": "error", "message": "Không tìm thấy câu hỏi"}
+        question, username = row
+        
+        # 2. Truyền phong cách (style) vào Prompt
+        prompt = f"""Bạn là Trợ lý Hành chính cao cấp của ABC TECH.
+        Hãy soạn một BẢN NHÁP câu trả lời theo phong cách [{style}] để giải đáp cho nhân viên {username}.
+        Câu hỏi: "{question}"
+        
+        YÊU CẦU: Trả về văn bản trực tiếp, không giải thích dài dòng."""
+        
+        draft = generate_content_with_fallback(prompt)
+        
+        # 3. Lưu vào Database
+        c.execute("UPDATE unanswered_questions SET draft_answer = %s WHERE id = %s", (draft, q_id))
+        conn.commit()
+        c.close()
+        
+        return {"status": "success", "draft": draft}
     except Exception as e:
         if conn: conn.rollback()
         return {"status": "error", "message": str(e)}
