@@ -1188,18 +1188,58 @@ def get_system_logs():
 @app.get("/admin/unanswered")
 def get_unanswered():
     conn = None
+    c = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id, question, username, timestamp FROM unanswered_questions WHERE is_trashed = false ORDER BY timestamp DESC")
-        logs = [{"id": r[0], "question": r[1], "username": r[2], "time": r[3]} for r in c.fetchall()]
-        c.close()
+        # 💡 Lấy thêm draft_answer và reference_sources
+        c.execute("SELECT id, question, username, timestamp, draft_answer, reference_sources FROM unanswered_questions WHERE is_trashed = false ORDER BY timestamp DESC")
+        logs = [{"id": r[0], "question": r[1], "username": r[2], "time": r[3], "draft_answer": r[4], "reference_sources": r[5]} for r in c.fetchall()]
         return logs
     except Exception as e:
-        return {"status": "error", "message": f"Lỗi: {str(e)}"}
+        return {"status": "error", "message": f"Lỗi truy xuất dữ liệu: {str(e)}"}
+    finally:
+        if c: c.close()
+        if conn: conn.close()
+
+@app.post("/admin/train_and_respond/{q_id}")
+def train_and_respond(q_id: int, req: AnswerReq, background_tasks: BackgroundTasks):
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # 1. Lấy thông tin câu hỏi
+        c.execute("SELECT session_id, question, username FROM unanswered_questions WHERE id = %s", (q_id,))
+        row = c.fetchone()
+        if not row: return {"status": "error", "message": "Không tìm thấy câu hỏi"}
+        session_id, question, username = row
+        
+        # 2. Nạp vào Kho tri thức vĩnh viễn (Bảng faqs)
+        current_time = datetime.now()
+        c.execute("INSERT INTO faqs (question, answer, unanswered_id, created_at, updated_at) VALUES (%s, %s, %s, %s, %s)",
+                  (question, req.answer, q_id, current_time, current_time))
+        
+        # 3. Phản hồi cho nhân viên
+        notification_msg = f"🔔 **[Giải đáp từ Quản trị viên]**\n\n**Hỏi:** {question}\n\n**Đáp:** {req.answer}"
+        c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (%s, %s, %s, %s, %s)",
+                  (session_id, username, "bot", notification_msg, "['Quản lý đã duyệt']"))
+        c.execute("UPDATE chat_sessions SET last_active = %s WHERE id = %s", (current_time, session_id))
+        
+        short_msg = f"Admin đã giải đáp: '{question[:25]}...'"
+        c.execute("INSERT INTO notifications (username, session_id, message, timestamp) VALUES (%s, %s, %s, %s)", 
+                  (username, session_id, short_msg, current_time))
+
+        # 4. Xóa khỏi danh sách chờ
+        c.execute("DELETE FROM unanswered_questions WHERE id = %s", (q_id,))
+        conn.commit()
+        
+        return {"status": "success", "message": "Đã phản hồi và nạp tri thức!"}
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
     finally:
         if conn: return_db_connection(conn)
-
 @app.get("/admin/unanswered/trashed")
 def get_trashed_unanswered():
     conn = None
