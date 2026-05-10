@@ -1399,7 +1399,7 @@ def generate_draft_with_style(q_id: int, style: str = "chuyên nghiệp"):
         if conn: conn.rollback()
         return {"status": "error", "message": str(e)}
     finally:
-        if conn: return_db_connection(cconn)
+        if conn: return_db_connection(conn)
 
 @app.put("/admin/unanswered/{q_id}/trash")
 def trash_unanswered(q_id: int):
