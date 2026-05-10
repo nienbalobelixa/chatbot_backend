@@ -1200,7 +1200,8 @@ def get_unanswered():
         return {"status": "error", "message": f"Lỗi truy xuất dữ liệu: {str(e)}"}
     finally:
         if c: c.close()
-        if conn: conn.close()
+        if conn: 
+            return_db_connection(conn)  #trả kết nối
 
 @app.post("/admin/train_and_respond/{q_id}")
 def train_and_respond(q_id: int, req: AnswerReq, background_tasks: BackgroundTasks):
@@ -1454,7 +1455,7 @@ def check_reminders_loop():
             c.execute("SELECT id, username, task FROM reminders WHERE remind_at <= %s AND is_notified = false", (now,))
             pending = c.fetchall()
             for r_id, user, task in pending:
-                msg = f"⏰ **[NHẮC NHỞ CÔNG VIỆC]**: Bạn có việc cần làm ngay bây giờ:\n\n👉 **{task}**"
+                msg = f"⏰ **[NHẮC NHỞ CÔNG VIỆC]**: Bạn có việc cần làm ngay bây giờ:\n\n  👉  **{task}**"
                 c.execute("INSERT INTO notifications (username, message, is_read, session_id, timestamp) VALUES (%s, %s, false, 'broadcast', %s)",
                           (user, msg, now))
                 c.execute("UPDATE reminders SET is_notified = true WHERE id = %s", (r_id,))
@@ -1463,9 +1464,9 @@ def check_reminders_loop():
         except Exception as e:
             print(f"Lỗi quét nhắc nhở: {e}")
         finally:
-            # 🌟 Bắt buộc phải có dòng này để trả connection về Pool sau mỗi phút quét!
-            if conn: return_db_connection(conn)
-            
+            # 💡 BẮT BUỘC: Trả kết nối về lại cho Hồ chứa
+            if conn:
+                return_db_connection(conn) 
         time.sleep(60)
 
 threading.Thread(target=check_reminders_loop, daemon=True).start()
