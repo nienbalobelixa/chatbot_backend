@@ -282,6 +282,9 @@ class RenameRequest(BaseModel): title: str
 class FeedbackReq(BaseModel): session_id: str; bot_response: str; rating: str; reason: str = ""
 class UpdateRoleReq(BaseModel): role: str
 class AnswerReq(BaseModel): question: str; answer: str
+class TranslateReq(BaseModel):
+    text: str
+    target_language: str
 class EditFaqReq(BaseModel): question: str; answer: str
 class BroadcastReq(BaseModel): message: str; admin_username: str = None
 
@@ -987,6 +990,27 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
     finally:
         if conn:
             return_db_connection(conn)
+@app.post("/admin/translate")
+def translate_draft(req: TranslateReq):
+    """API dịch bản nháp sang ngôn ngữ khác"""
+    prompt = f"""Bạn là Biên dịch viên Hành chính Nhân sự chuyên nghiệp cấp cao.
+    Vui lòng dịch đoạn văn bản sau sang {req.target_language}.
+    
+    YÊU CẦU QUAN TRỌNG:
+    1. Giữ nguyên văn phong trang trọng, lịch sự, chuyên nghiệp của môi trường doanh nghiệp.
+    2. Giữ nguyên các định dạng xuống dòng, dấu đầu dòng (nếu có).
+    3. Chỉ trả về bản dịch, tuyệt đối không giải thích hay thêm chữ nào khác.
+    
+    [VĂN BẢN GỐC]:
+    {req.text}
+    """
+    
+    try:
+        translated_text = generate_content_with_fallback(prompt)
+        return {"status": "success", "translated_text": translated_text}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    
 
 @app.get("/admin/documents")
 def get_documents():
@@ -1375,7 +1399,7 @@ def generate_draft_with_style(q_id: int, style: str = "chuyên nghiệp"):
         if conn: conn.rollback()
         return {"status": "error", "message": str(e)}
     finally:
-        if conn: return_db_connection(conn)
+        if conn: return_db_connection(cconn)
 
 @app.put("/admin/unanswered/{q_id}/trash")
 def trash_unanswered(q_id: int):
