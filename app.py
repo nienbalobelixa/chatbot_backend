@@ -145,6 +145,8 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS chat_sessions (
             id TEXT PRIMARY KEY, username TEXT, title TEXT, last_active TIMESTAMP)''')
         
+        c.execute("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT false")
+
         c.execute('''CREATE TABLE IF NOT EXISTS chat_history (
             id SERIAL PRIMARY KEY, session_id TEXT, username TEXT, role TEXT, 
             content TEXT, sources TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
@@ -307,15 +309,42 @@ async def get_sessions(username: str):
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id, title, last_active FROM chat_sessions WHERE username = %s ORDER BY last_active DESC", (username,))
+        # 💡 Lấy thêm cột is_pinned
+        c.execute("SELECT id, title, last_active, is_pinned FROM chat_sessions WHERE username = %s ORDER BY last_active DESC", (username,))
         rows = c.fetchall()
         c.close()
-        return [{"id": r[0], "title": r[1], "last_active": r[2]} for r in rows]
+        # 💡 Trả về JSON có is_pinned
+        return [{"id": r[0], "title": r[1], "last_active": r[2], "is_pinned": bool(r[3]) if len(r) > 3 and r[3] is not None else False} for r in rows]
     except Exception as e:
         return {"status": "error", "message": str(e)}
     finally:
         if conn:
             return_db_connection(conn)
+
+@app.put("/sessions/{session_id}/pin")
+def toggle_pin_session(session_id: str):
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Lấy trạng thái ghim hiện tại
+        c.execute("SELECT is_pinned FROM chat_sessions WHERE id = %s", (session_id,))
+        row = c.fetchone()
+        
+        if row:
+            # Đảo ngược trạng thái (True thành False, False thành True)
+            new_status = not bool(row[0])
+            c.execute("UPDATE chat_sessions SET is_pinned = %s WHERE id = %s", (new_status, session_id))
+            conn.commit()
+            return {"status": "success", "is_pinned": new_status}
+            
+        return {"status": "error", "message": "Không tìm thấy phiên chat"}
+    except Exception as e:
+        if conn: conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        if conn: return_db_connection(conn)
 
 @app.get("/history/{session_id}")
 async def get_chat_history(session_id: str):
@@ -345,9 +374,39 @@ def rewrite_query(original_query: str, history_text: str = "") -> str:
         prompt = f"Hệ thống tối ưu truy vấn...\n[LỊCH SỬ]: {history_text}\n[CÂU HỎI]: {original_query}\n[TRUY VẤN VIẾT LẠI]:"
         return generate_content_with_fallback(prompt).strip()
     except Exception: return original_query
+# 💡 HÀM MỚI: Agent phụ chạy ngầm để soạn bản nháp
+def generate_ai_draft(q_id: int, question: str, history: str, context: str):
+    """Tự động soạn bản nháp cho Quản lý dựa trên dữ liệu hiện có"""
+    prompt = f"""Bạn là Trợ lý cấp cao của Ban Giám đốc ABC TECH.
+    Hệ thống RAG hiện tại không tìm thấy câu trả lời chính xác 100% cho câu hỏi này.
+    NHIỆM VỤ: Dựa vào ngữ cảnh (nếu có) và lịch sử trò chuyện, hãy soạn một BẢN NHÁP câu trả lời chuyên nghiệp để Quản lý duyệt.
+    
+    [CÂU HỎI]: {question}
+    [LỊCH SỬ]: {history}
+    [NGỮ CẢNH TÌM ĐƯỢC]: {context}
+    
+    YÊU CẦU: Nội dung trang trọng, đầy đủ ý. Trả về trực tiếp văn bản, không chào hỏi.
+    Nếu có thông tin chưa chắc chắn, hãy để trống dạng [Cần điền...].
+    """
+    try:
+        draft = generate_content_with_fallback(prompt)
+        
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute(
+            "UPDATE unanswered_questions SET draft_answer = %s, reference_sources = %s WHERE id = %s",
+            (draft, context[:500] if context else "Không có", q_id)
+        )
+        conn.commit()
+        c.close()
+        return_db_connection(conn)
+        print(f" ✅ [AI Agent] Đã soạn xong bản nháp cho câu hỏi #{q_id}")
+    except Exception as e:
+        print(f" ❌ [AI Agent] Lỗi soạn nháp: {e}")
 
+# 🌟 HÀM ĐÃ SỬA: Chèn BackgroundTasks và kích hoạt Agent
 @app.post("/ask")
-def ask_ai(data: Question, username: str = "guest"):
+def ask_ai(data: Question, background_tasks: BackgroundTasks, username: str = "guest"):
     try:
         conn = get_db_connection()
         c = conn.cursor()
@@ -382,7 +441,7 @@ def ask_ai(data: Question, username: str = "guest"):
             rag_res = search_docs(optimized_query, user_role=user_role)
             context = rag_res.get("answer", "")
             raw_sources = rag_res.get("sources", [])
-            sources = raw_sources # Giữ nguyên tên file sạch, ví dụ: ["Bao_Mat_Thong_Tin_2026.pdf"]
+            sources = raw_sources 
             
             if user_role == 'admin':
                 prompt = f"""Bạn là Trợ lý Hành chính & Nhân sự (HR Copilot) cấp cao của ABC TECH.
@@ -426,17 +485,21 @@ Nếu Giám đốc yêu cầu nhắc nhở, thêm chính xác: [[REMINDER: {{"ta
         lower_answer = ai_answer.lower()
         if user_role != 'admin' and ("chưa được cập nhật" in lower_answer or "không có thông tin" in lower_answer):
             sources = []
-            try: c.execute("INSERT INTO unanswered_questions (question, username, session_id) VALUES (%s, %s, %s)", (data.question, username, s_id))
-            except: pass
+            try: 
+                # 💡 ĐÃ SỬA: Thêm RETURNING id để lấy ID vừa tạo
+                c.execute("INSERT INTO unanswered_questions (question, username, session_id) VALUES (%s, %s, %s) RETURNING id", (data.question, username, s_id))
+                new_q_id = c.fetchone()[0]
+                
+                # 💡 GỌI AGENT SOẠN NHÁP NGẦM
+                background_tasks.add_task(generate_ai_draft, new_q_id, data.question, history_text, context)
+            except Exception as e: 
+                print(f"Lỗi lưu câu hỏi chưa trả lời: {e}")
             
         if is_new_session:
             title = data.question[:30] + "..."
             c.execute("INSERT INTO chat_sessions (id, username, title, last_active) VALUES (%s, %s, %s, %s)", (s_id, username, title, current_time))
             
-        # 🔥 ĐÃ SỬA: Đưa dòng lưu câu hỏi của User thoát ra khỏi lệnh if (Nằm ngang hàng với if)
         c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (%s, %s, %s, %s, %s)", (s_id, username, "user", data.question, "[]"))
-
-        # Lưu câu trả lời của Bot (Giữ nguyên)
         c.execute("INSERT INTO chat_history (session_id, username, role, content, sources) VALUES (%s, %s, %s, %s, %s)", (s_id, username, "bot", ai_answer, str(sources)))
         c.execute("UPDATE chat_sessions SET last_active = %s WHERE id = %s", (current_time, s_id))
         conn.commit()
@@ -450,7 +513,6 @@ Nếu Giám đốc yêu cầu nhắc nhở, thêm chính xác: [[REMINDER: {{"ta
     finally:
         if conn:
             return_db_connection(conn)
-
 @app.post("/ask_with_file")
 async def ask_with_file(username: str, role: str = 'staff', question: str = Form(""), session_id: str = Form(""), file: UploadFile = File(...)):
     conn = None
